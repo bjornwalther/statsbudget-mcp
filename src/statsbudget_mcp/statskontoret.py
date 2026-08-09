@@ -12,15 +12,26 @@ File format:
 - First row: column headers
 
 Data covers 2006-2025 (expenditure) and includes both budget and outcome.
+
+Publication schedule (Statskontoret publishes new data at these intervals):
+- Expenditure (definitiv): ~March each year (covers previous year)
+- Income (prelimin\u00e4r 1): ~March (ESV estimate)
+- Income (prelimin\u00e4r 2): ~June (Government estimate in \u00c5rsredovisning f\u00f6r staten)
+- Income (prelimin\u00e4r 3): ~March year+2 (ESV estimate)
+- Income (definitiv): ~June year+2 (final)
+
+In practice, syncing once in March and once in June covers all updates.
 """
 
 from __future__ import annotations
 
 import csv
 import io
+import json
 import re
 import zipfile
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +42,29 @@ ARSUTFALL_PAGE = "/analys-och-statistik/oppna-data/arsutfall/"
 
 HREF_RE = re.compile(r'<a\b[^>]*href=["\']([^"\']+)["\'][^>]*>([\s\S]*?)</a>', re.IGNORECASE)
 TAG_RE = re.compile(r"<[^>]+>")
+UPDATED_RE = re.compile(r"Senast uppdaterad\s+(\d{4}-\d{2}-\d{2})")
+
+
+@dataclass
+class DataSourceMeta:
+    """Metadata about a synced data source for UI display."""
+
+    source: str
+    description: str
+    publication_cadence: str
+    last_synced_at: str | None = None
+    source_last_updated: str | None = None
+    files_downloaded: list[str] = field(default_factory=list)
+    years_covered: list[int] = field(default_factory=list)
+
+
+@dataclass
+class SyncStatus:
+    """Overall sync status for the Statskontoret data."""
+
+    last_sync: str | None = None
+    next_expected_update: str | None = None
+    sources: list[DataSourceMeta] = field(default_factory=list)
 
 
 @dataclass
@@ -86,6 +120,36 @@ class AreaSummary:
     delta_msek: float
 
 
+# Publication schedule constants for UI
+PUBLICATION_SCHEDULE = {
+    "expenditure_definitive": {
+        "description": "Definitiva utgifter f\u00f6r f\u00f6reg\u00e5ende \u00e5r",
+        "typical_month": 3,
+        "cadence": "Annually in March",
+    },
+    "income_preliminary_1": {
+        "description": "Prelimin\u00e4r 1: ESV:s ber\u00e4kning (skattetyp 1000/7000/8000 prognos)",
+        "typical_month": 3,
+        "cadence": "Annually in March",
+    },
+    "income_preliminary_2": {
+        "description": "Prelimin\u00e4r 2: Regeringens ber\u00e4kning i \u00c5rsredovisning f\u00f6r staten",
+        "typical_month": 6,
+        "cadence": "Annually in June",
+    },
+    "income_preliminary_3": {
+        "description": "Prelimin\u00e4r 3: ESV:s uppdaterade ber\u00e4kning (\u00e5r t+1)",
+        "typical_month": 3,
+        "cadence": "Annually in March (year + 1)",
+    },
+    "income_definitive": {
+        "description": "Definitiva inkomster (alla inkomsttyper slutliga)",
+        "typical_month": 6,
+        "cadence": "Annually in June (year + 2)",
+    },
+}
+
+
 def _parse_swedish_decimal(value: str) -> float | None:
     """Parse Swedish number format (comma as decimal separator)."""
     value = value.strip()
@@ -107,6 +171,24 @@ def _parse_int_safe(value: str) -> int:
         return 0
 
 
+def _now_iso() -> str:
+    """Current UTC time as ISO string."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _next_expected_update() -> str:
+    """Estimate next Statskontoret data release."""
+    now = datetime.now(timezone.utc)
+    year = now.year
+    # March and June are the update months
+    if now.month < 3:
+        return f"{year}-03-15"
+    elif now.month < 6:
+        return f"{year}-06-15"
+    else:
+        return f"{year + 1}-03-15"
+
+
 class StatskontoretClient:
     """Async client for Statskontoret budget outcome data.
 
@@ -118,6 +200,7 @@ class StatskontoretClient:
         async with StatskontoretClient() as sk:
             await sk.sync(year=2024)
             overview = sk.get_budget_overview(2024)
+            status = sk.get_sync_status()
     """
 
     def __init__(
@@ -130,6 +213,44 @@ class StatskontoretClient:
         self._data_dir.mkdir(parents=True, exist_ok=True)
         self._expenditure_data: list[ExpenditureRow] = []
         self._income_data: list[IncomeRow] = []
+        self._sync_meta: SyncStatus = SyncStatus()
+        self._meta_path = self._data_dir / "sync_meta.json"
+        self._load_meta()
+
+    def _load_meta(self) -> None:
+        """Load sync metadata from disk if available."""
+        if self._meta_path.exists():
+            try:
+                raw = json.loads(self._meta_path.read_text(encoding="utf-8"))
+                self._sync_meta = SyncStatus(
+                    last_sync=raw.get("last_sync"),
+                    next_expected_update=raw.get("next_expected_update"),
+                    sources=[
+                        DataSourceMeta(**s) for s in raw.get("sources", [])
+                    ],
+                )
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+    def _save_meta(self) -> None:
+        """Persist sync metadata to disk."""
+        data = {
+            "last_sync": self._sync_meta.last_sync,
+            "next_expected_update": self._sync_meta.next_expected_update,
+            "sources": [
+                {
+                    "source": s.source,
+                    "description": s.description,
+                    "publication_cadence": s.publication_cadence,
+                    "last_synced_at": s.last_synced_at,
+                    "source_last_updated": s.source_last_updated,
+                    "files_downloaded": s.files_downloaded,
+                    "years_covered": s.years_covered,
+                }
+                for s in self._sync_meta.sources
+            ],
+        }
+        self._meta_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -140,10 +261,15 @@ class StatskontoretClient:
     async def __aexit__(self, *args: Any) -> None:
         await self.close()
 
-    async def discover_download_links(self, year: int | None = None) -> list[dict[str, str]]:
+    async def discover_download_links(
+        self, year: int | None = None
+    ) -> tuple[list[dict[str, str]], list[str]]:
         """Scrape the arsutfall page for download links.
 
-        Returns list of dicts with 'url', 'text', and 'type' (expenditure/income).
+        Returns:
+            Tuple of (links, source_update_dates) where links is a list of
+            dicts with 'url', 'text', and 'type' (expenditure/income), and
+            source_update_dates is a list of dates found on the page.
         """
         url = f"{BASE_URL}{ARSUTFALL_PAGE}"
         if year:
@@ -152,6 +278,9 @@ class StatskontoretClient:
         resp = await self._client.get(url)
         resp.raise_for_status()
         html = resp.text
+
+        # Extract "Senast uppdaterad" dates from the page
+        source_dates = UPDATED_RE.findall(html)
 
         links: list[dict[str, str]] = []
         for match in HREF_RE.finditer(html):
@@ -176,7 +305,7 @@ class StatskontoretClient:
             resolved = href if href.startswith("http") else f"{BASE_URL}{href}"
             links.append({"url": resolved, "text": text, "type": file_type})
 
-        return links
+        return links, source_dates
 
     async def download_file(self, url: str, filename: str) -> Path:
         """Download a file to the data directory."""
@@ -186,12 +315,16 @@ class StatskontoretClient:
         path.write_bytes(resp.content)
         return path
 
-    async def sync(self, year: int | None = None) -> None:
+    async def sync(self, year: int | None = None) -> SyncStatus:
         """Download and parse latest data from Statskontoret.
 
         If year is specified, only sync that year's data.
+        Returns SyncStatus with metadata about what was fetched.
         """
-        links = await self.discover_download_links(year=year)
+        links, source_dates = await self.discover_download_links(year=year)
+        sync_time = _now_iso()
+        latest_source_date = max(source_dates) if source_dates else None
+        files_downloaded: list[str] = []
 
         for link in links:
             url = link["url"]
@@ -200,6 +333,7 @@ class StatskontoretClient:
             filename = f"{file_type}_{year or 'latest'}.{suffix}"
 
             path = await self.download_file(url, filename)
+            files_downloaded.append(filename)
 
             if suffix == "zip":
                 csv_content = self._extract_csv_from_zip(path)
@@ -207,6 +341,51 @@ class StatskontoretClient:
                     self._expenditure_data.extend(self._parse_expenditure_csv(csv_content))
                 elif csv_content and file_type == "income":
                     self._income_data.extend(self._parse_income_csv(csv_content))
+
+        # Update sync metadata
+        source_meta = DataSourceMeta(
+            source="Statskontoret \u00d6ppna Data - \u00c5rsutfall",
+            description="Annual budget outcome: expenditure and income for central government",
+            publication_cadence="Expenditure: March (annual). Income: March + June (prelim/definitive over 2 years).",
+            last_synced_at=sync_time,
+            source_last_updated=latest_source_date,
+            files_downloaded=files_downloaded,
+            years_covered=self.get_available_years(),
+        )
+
+        self._sync_meta = SyncStatus(
+            last_sync=sync_time,
+            next_expected_update=_next_expected_update(),
+            sources=[source_meta],
+        )
+        self._save_meta()
+
+        return self._sync_meta
+
+    def get_sync_status(self) -> SyncStatus:
+        """Get current sync status and data freshness info.
+
+        Useful for UI display: shows when data was last fetched,
+        when the source was last updated, and when to expect new data.
+        """
+        return self._sync_meta
+
+    def get_publication_schedule(self) -> dict[str, Any]:
+        """Get the publication schedule for Statskontoret budget data.
+
+        Returns a dict describing when new data is typically published,
+        useful for displaying freshness indicators in a UI.
+        """
+        return {
+            "schedule": PUBLICATION_SCHEDULE,
+            "summary": (
+                "Statskontoret publicerar ny budgetdata tv\u00e5 g\u00e5nger per \u00e5r: "
+                "utgifter (definitiva) i mars, inkomster (prelimin\u00e4ra) i mars och juni. "
+                "Definitiva inkomster publiceras i juni tv\u00e5 \u00e5r efter budget\u00e5ret."
+            ),
+            "next_expected_update": _next_expected_update(),
+            "sync_recommendation": "Sync in March and June each year for complete coverage.",
+        }
 
     def load_from_csv(
         self,
@@ -234,20 +413,7 @@ class StatskontoretClient:
             return None
 
     def _parse_expenditure_csv(self, content: str) -> list[ExpenditureRow]:
-        """Parse expenditure CSV content into ExpenditureRow objects.
-
-        Expected columns (Swedish):
-        - Utgiftsomrade (or Utgiftsomr\u00e5de)
-        - Utgiftsomradesnamn (or Utgiftsomr\u00e5desnamn)
-        - Anslag
-        - Anslagsnamn
-        - Ar (or \u00c5r)
-        - Statens budget
-        - Andringsbudgetar (or \u00c4ndringsbudgetar)
-        - Utfall
-        - Ingaende overforingsbelopp (or Ing\u00e5ende \u00f6verf\u00f6ringsbelopp)
-        - Utgaende overforingsbelopp (or Utg\u00e5ende \u00f6verf\u00f6ringsbelopp)
-        """
+        """Parse expenditure CSV content into ExpenditureRow objects."""
         rows: list[ExpenditureRow] = []
         reader = csv.DictReader(io.StringIO(content), delimiter=";")
 
@@ -329,9 +495,7 @@ class StatskontoretClient:
                 if "utfalls" in lower:
                     continue
                 mapping.setdefault("area_name", name)
-            elif lower == "anslag" or lower == "anslag":
-                if "utfalls" in lower or "namn" in lower:
-                    continue
+            elif lower == "anslag":
                 mapping.setdefault("approp_id", name)
             elif "anslagsnamn" in lower:
                 if "utfalls" in lower:
@@ -372,15 +536,24 @@ class StatskontoretClient:
         mapping: dict[str, str] = {}
         for name in fieldnames:
             lower = name.lower().strip()
-            if lower == "inkomsttyp" or (lower.startswith("inkomsttyp") and "namn" not in lower and "utfalls" not in lower):
+            if lower == "inkomsttyp" or (
+                lower.startswith("inkomsttyp") and "namn" not in lower and "utfalls" not in lower
+            ):
                 mapping.setdefault("income_type", name)
             elif "inkomsttypsnamn" in lower and "utfalls" not in lower:
                 mapping.setdefault("income_type_name", name)
-            elif "inkomsthuvudgrupp" in lower and "namn" not in lower and "utfalls" not in lower:
+            elif (
+                "inkomsthuvudgrupp" in lower and "namn" not in lower and "utfalls" not in lower
+            ):
                 mapping.setdefault("main_group", name)
             elif "inkomsthuvudgruppsnamn" in lower and "utfalls" not in lower:
                 mapping.setdefault("main_group_name", name)
-            elif lower == "inkomsttitel" or (lower.startswith("inkomsttitel") and "namn" not in lower and "grupp" not in lower and "utfalls" not in lower):
+            elif lower == "inkomsttitel" or (
+                lower.startswith("inkomsttitel")
+                and "namn" not in lower
+                and "grupp" not in lower
+                and "utfalls" not in lower
+            ):
                 mapping.setdefault("title", name)
             elif "inkomsttitelsnamn" in lower and "utfalls" not in lower:
                 mapping.setdefault("title_name", name)
