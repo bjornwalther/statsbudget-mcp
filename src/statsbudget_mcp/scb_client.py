@@ -11,6 +11,8 @@ Data sources:
 
 from __future__ import annotations
 
+import asyncio
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -22,6 +24,9 @@ TABLES = {
     "tax_revenue": "SkatteIntakt",
     "tax_quota": "SkattekvotBNP",
 }
+
+MAX_RETRIES = 2
+RETRY_BASE_DELAY = 1.0  # seconds, doubles each retry
 
 TAX_TYPE_LABELS: dict[str, str] = {
     "101": "Skatt p\u00e5 arbete",
@@ -83,6 +88,15 @@ QUOTA_TYPE_LABELS: dict[str, str] = {
 }
 
 
+def _is_retryable(exc: Exception) -> bool:
+    """Check if an exception warrants a retry."""
+    if isinstance(exc, httpx.TimeoutException):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code >= 500:
+        return True
+    return False
+
+
 @dataclass
 class TaxRevenueRow:
     """A single tax revenue observation."""
@@ -107,6 +121,8 @@ class TaxQuotaRow:
 class SCBClient:
     """Async client for SCB PxWeb API (tax/revenue tables).
 
+    Includes exponential backoff retry on timeout and server errors.
+
     Usage:
         async with SCBClient() as scb:
             data = await scb.get_tax_revenue(years=[2023, 2024])
@@ -125,11 +141,29 @@ class SCBClient:
         await self.close()
 
     async def _post_query(self, table: str, query: dict[str, Any]) -> dict[str, Any]:
-        """POST a PxWeb query and return parsed JSON response."""
+        """POST a PxWeb query with retry on transient failures."""
         url = f"{BASE_URL}/{table}"
-        resp = await self._client.post(url, json=query)
-        resp.raise_for_status()
-        return resp.json()
+        last_exc: Exception | None = None
+
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                resp = await self._client.post(url, json=query)
+                resp.raise_for_status()
+                return resp.json()
+            except Exception as exc:
+                last_exc = exc
+                if attempt < MAX_RETRIES and _is_retryable(exc):
+                    delay = RETRY_BASE_DELAY * (2 ** attempt)
+                    print(
+                        f"SCB API retry {attempt + 1}/{MAX_RETRIES} "
+                        f"after {type(exc).__name__}, waiting {delay}s",
+                        file=sys.stderr,
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    raise
+
+        raise last_exc  # type: ignore[misc]
 
     def _build_query(
         self,
