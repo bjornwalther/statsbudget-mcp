@@ -3,21 +3,25 @@
 Exposes Swedish national budget data as MCP tools. Entry point for
 `uvx statsbudget-mcp` and Claude Desktop integration.
 
-Tools:
-- Budget: overview, expenditure area drill-down, year comparison
-- Revenue: tax revenue by type, timeseries
-- Laffer: tax quota vs GDP with reform annotations
-- Meta: sync status, publication schedule, available years
+Startup behavior:
+1. Open SQLite cache (~/.statsbudget-cache/statsbudget.db)
+2. If cache has data and is fresh (< 1 week): load from cache (ms)
+3. If cache is empty or stale: sync from Statskontoret, save to cache
+4. SCB data is fetched on-demand (with retry) and cached per session
 """
 
 from __future__ import annotations
 
 import json
+import sys
 from contextlib import asynccontextmanager
+from dataclasses import asdict
+from datetime import datetime, timezone
 from typing import Any
 
 from fastmcp import FastMCP
 
+from .cache import BudgetCache
 from .laffer import (
     TAX_REFORMS,
     build_laffer_curve,
@@ -25,18 +29,52 @@ from .laffer import (
     laffer_to_chart_data,
 )
 from .scb_client import SCBClient
-from .statskontoret import StatskontoretClient
+from .statskontoret import (
+    ExpenditureRow,
+    IncomeRow,
+    StatskontoretClient,
+)
 
 _scb: SCBClient | None = None
 _sk: StatskontoretClient | None = None
+_cache: BudgetCache | None = None
+
+
+def _rows_to_dicts(rows: list) -> list[dict[str, Any]]:
+    """Convert dataclass rows to dicts for cache storage."""
+    return [asdict(r) for r in rows]
 
 
 @asynccontextmanager
 async def lifespan(server: FastMCP):
-    """Initialize and tear down data clients."""
-    global _scb, _sk
+    """Initialize clients, load or sync data, tear down on exit."""
+    global _scb, _sk, _cache
     _scb = SCBClient()
     _sk = StatskontoretClient()
+    _cache = BudgetCache()
+
+    # Load from cache if fresh, otherwise sync
+    try:
+        if _cache.is_populated() and not _cache.needs_refresh():
+            _load_from_cache(_sk, _cache)
+            print(
+                f"Loaded from cache ({_cache.db_path}), "
+                f"age: {_cache.cache_age_hours():.1f}h",
+                file=sys.stderr,
+            )
+        else:
+            print("Cache empty or stale, syncing...", file=sys.stderr)
+            try:
+                await _sync_and_cache(_sk, _cache)
+                print("Sync complete, data cached.", file=sys.stderr)
+            except Exception as exc:
+                print(f"Sync failed: {exc}. Starting with empty data.", file=sys.stderr)
+                if _cache.is_populated():
+                    _load_from_cache(_sk, _cache)
+                    print("Fell back to stale cache.", file=sys.stderr)
+    except Exception as exc:
+        print(f"Startup warning: {exc}", file=sys.stderr)
+
     try:
         yield
     finally:
@@ -44,8 +82,31 @@ async def lifespan(server: FastMCP):
             await _scb.close()
         if _sk:
             await _sk.close()
+        if _cache:
+            _cache.close()
         _scb = None
         _sk = None
+        _cache = None
+
+
+def _load_from_cache(sk: StatskontoretClient, cache: BudgetCache) -> None:
+    """Populate the Statskontoret client from cached data."""
+    exp_rows = cache.load_expenditure()
+    inc_rows = cache.load_income()
+    sk._expenditure_data = [
+        ExpenditureRow(**{k: v for k, v in r.items()}) for r in exp_rows
+    ]
+    sk._income_data = [
+        IncomeRow(**{k: v for k, v in r.items()}) for r in inc_rows
+    ]
+
+
+async def _sync_and_cache(sk: StatskontoretClient, cache: BudgetCache) -> None:
+    """Sync from Statskontoret and persist to cache."""
+    await sk.sync()
+    cache.store_expenditure(_rows_to_dicts(sk.expenditure_data))
+    cache.store_income(_rows_to_dicts(sk.income_data))
+    cache.set_meta("last_sync_utc", datetime.now(timezone.utc).isoformat(timespec="seconds"))
 
 
 mcp = FastMCP(
@@ -71,33 +132,39 @@ def _require_sk() -> StatskontoretClient:
     return _sk
 
 
+def _require_cache() -> BudgetCache:
+    if _cache is None:
+        raise RuntimeError("Cache not initialized. Server not started?")
+    return _cache
+
+
 EXPENDITURE_AREAS = [
     ("01", "Rikets styrelse"),
-    ("02", "Samhällsekonomi och finansförvaltning"),
+    ("02", "Samh\u00e4llsekonomi och finansf\u00f6rvaltning"),
     ("03", "Skatt, tull och exekution"),
-    ("04", "Rättsväsendet"),
+    ("04", "R\u00e4ttsv\u00e4sendet"),
     ("05", "Internationell samverkan"),
-    ("06", "Försvar och samhällets krisberedskap"),
-    ("07", "Internationellt bistånd"),
+    ("06", "F\u00f6rsvar och samh\u00e4llets krisberedskap"),
+    ("07", "Internationellt bist\u00e5nd"),
     ("08", "Migration"),
-    ("09", "Hälsovård, sjukvård och social omsorg"),
-    ("10", "Ekonomisk trygghet vid sjukdom och funktionsnedsättning"),
-    ("11", "Ekonomisk trygghet vid ålderdom"),
-    ("12", "Ekonomisk trygghet för familjer och barn"),
-    ("13", "Integration och jämställdhet"),
+    ("09", "H\u00e4lsov\u00e5rd, sjukv\u00e5rd och social omsorg"),
+    ("10", "Ekonomisk trygghet vid sjukdom och funktionsneds\u00e4ttning"),
+    ("11", "Ekonomisk trygghet vid \u00e5lderdom"),
+    ("12", "Ekonomisk trygghet f\u00f6r familjer och barn"),
+    ("13", "Integration och j\u00e4mst\u00e4lldhet"),
     ("14", "Arbetsmarknad och arbetsliv"),
-    ("15", "Studiestöd"),
+    ("15", "Studiest\u00f6d"),
     ("16", "Utbildning och universitetsforskning"),
     ("17", "Kultur, medier, trossamfund och fritid"),
-    ("18", "Samhällsplanering, bostadsförsörjning och byggande samt konsumentpolitik"),
+    ("18", "Samh\u00e4llsplanering, bostadsf\u00f6rs\u00f6rjning och byggande samt konsumentpolitik"),
     ("19", "Regional utveckling"),
-    ("20", "Allmän miljö- och naturvård"),
+    ("20", "Allm\u00e4n milj\u00f6- och naturv\u00e5rd"),
     ("21", "Energi"),
     ("22", "Kommunikationer"),
-    ("23", "Areella näringar, landsbygd och livsmedel"),
-    ("24", "Näringsliv"),
-    ("25", "Allmänna bidrag till kommuner"),
-    ("26", "Statsskuldsräntor m.m."),
+    ("23", "Areella n\u00e4ringar, landsbygd och livsmedel"),
+    ("24", "N\u00e4ringsliv"),
+    ("25", "Allm\u00e4nna bidrag till kommuner"),
+    ("26", "Statsskulds\u00e4ntor m.m."),
     ("27", "Avgiften till Europeiska unionen"),
 ]
 
@@ -183,17 +250,25 @@ async def compare_budgets(year_a: int, year_b: int) -> list[dict[str, Any]]:
 async def sync_budget_data(year: int | None = None) -> dict[str, Any]:
     """Download and parse latest budget data from Statskontoret.
 
-    Call this before querying budget data for the first time, or to
-    refresh after new data has been published.
+    Also persists the data to the local SQLite cache so subsequent
+    server startups are instant.
 
     Args:
         year: Specific year to sync (default: latest available).
     """
     sk = _require_sk()
+    cache = _require_cache()
     status = await sk.sync(year=year)
+
+    # Persist to cache
+    cache.store_expenditure(_rows_to_dicts(sk.expenditure_data))
+    cache.store_income(_rows_to_dicts(sk.income_data))
+    cache.set_meta("last_sync_utc", datetime.now(timezone.utc).isoformat(timespec="seconds"))
+
     return {
         "last_sync": status.last_sync,
         "next_expected_update": status.next_expected_update,
+        "cache_stats": cache.get_stats(),
         "sources": [
             {
                 "source": s.source,
@@ -345,10 +420,12 @@ async def get_sync_status() -> dict[str, Any]:
     last updated, and when to expect the next publication.
     """
     sk = _require_sk()
+    cache = _require_cache()
     status = sk.get_sync_status()
     return {
         "last_sync": status.last_sync,
         "next_expected_update": status.next_expected_update,
+        "cache": cache.get_stats(),
         "sources": [
             {
                 "source": s.source,
@@ -383,6 +460,17 @@ async def get_available_years() -> dict[str, Any]:
     """
     sk = _require_sk()
     return {"years": sk.get_available_years()}
+
+
+@mcp.tool()
+async def get_cache_stats() -> dict[str, Any]:
+    """Get SQLite cache diagnostics.
+
+    Returns row counts, years covered, cache age, and whether
+    a refresh is recommended.
+    """
+    cache = _require_cache()
+    return cache.get_stats()
 
 
 # ---------------------------------------------------------------------------
