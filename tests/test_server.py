@@ -15,8 +15,9 @@ class TestServerSetup:
     def test_mcp_name(self):
         assert mcp.name == "statsbudget-mcp"
 
-    def test_mcp_has_description(self):
-        assert "Swedish national budget" in (mcp.description or "")
+    def test_mcp_has_instructions(self):
+        instructions = getattr(mcp, "instructions", None) or ""
+        assert "Swedish national budget" in instructions
 
     def test_expenditure_areas_count(self):
         assert len(EXPENDITURE_AREAS) == 27
@@ -39,7 +40,9 @@ class TestClientGuards:
         original = mod._scb
         mod._scb = None
         try:
-            with pytest.raises(RuntimeError, match="SCB client not initialized"):
+            with pytest.raises(
+                RuntimeError, match="SCB client not initialized",
+            ):
                 _require_scb()
         finally:
             mod._scb = original
@@ -50,7 +53,10 @@ class TestClientGuards:
         original = mod._sk
         mod._sk = None
         try:
-            with pytest.raises(RuntimeError, match="Statskontoret client not initialized"):
+            with pytest.raises(
+                RuntimeError,
+                match="Statskontoret client not initialized",
+            ):
                 _require_sk()
         finally:
             mod._sk = original
@@ -61,17 +67,24 @@ class TestClientGuards:
         original = mod._cache
         mod._cache = None
         try:
-            with pytest.raises(RuntimeError, match="Cache not initialized"):
+            with pytest.raises(
+                RuntimeError, match="Cache not initialized",
+            ):
                 _require_cache()
         finally:
             mod._cache = original
 
 
 class TestToolRegistration:
-    """Verify all expected tools are registered on the MCP server."""
+    """Verify all expected tools are registered on the MCP server.
+
+    Note: accesses private _tool_manager._tools, which is fragile
+    across FastMCP versions. If this breaks, inspect the public API
+    for an alternative.
+    """
 
     def _tool_names(self) -> set[str]:
-        tools = mcp._tool_manager._tools
+        tools = mcp._tool_manager._tools  # noqa: SLF001
         return set(tools.keys())
 
     def test_budget_tools_registered(self):
