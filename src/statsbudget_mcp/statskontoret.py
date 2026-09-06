@@ -374,10 +374,11 @@ class StatskontoretClient:
             )
             if not is_data_file:
                 continue
-            if raw_href.startswith("http"):
-                resolved = raw_href
-            else:
-                resolved = f"{BASE_URL}{raw_href}"
+            resolved = (
+                raw_href
+                if raw_href.startswith("http")
+                else f"{BASE_URL}{raw_href}"
+            )
             if not _is_allowed_host(resolved):
                 print(
                     f"Skipping URL from disallowed host: {resolved}",
@@ -465,10 +466,16 @@ class StatskontoretClient:
         )
 
         # Separate expenditure and income links
-        exp_links = [l for l in links if l["type"] == "expenditure"]
+        exp_links = [
+            lnk for lnk in links
+            if lnk["type"] == "expenditure"
+        ]
         inc_links = sorted(
-            [l for l in links if l["type"] == "income"],
-            key=lambda l: l.get("revision_priority", 0),
+            [
+                lnk for lnk in links
+                if lnk["type"] == "income"
+            ],
+            key=lambda lnk: lnk.get("revision_priority", 0),
             reverse=True,
         )
 
