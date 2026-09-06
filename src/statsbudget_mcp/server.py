@@ -1,7 +1,7 @@
 """FastMCP server for statsbudget-mcp.
 
-Exposes Swedish national budget data as MCP tools. Entry point for
-`uvx statsbudget-mcp` and Claude Desktop integration.
+Exposes Swedish national budget outturn data and tax revenue as MCP tools.
+Entry point for `uvx statsbudget-mcp` and Claude Desktop integration.
 
 Startup behavior:
 1. Open SQLite cache (~/.statsbudget-cache/statsbudget.db)
@@ -141,9 +141,11 @@ async def _sync_and_cache(sk: StatskontoretClient, cache: BudgetCache) -> None:
 mcp = FastMCP(
     "statsbudget-mcp",
     instructions=(
-        "Swedish national budget data: expenditure areas, tax revenue, "
-        "Laffer curve analysis, and budget comparisons. "
-        "Data from SCB, Statskontoret, and Riksdagen."
+        "Swedish national budget data: expenditure outturn by area, "
+        "tax revenue from SCB, and Laffer curve analysis. "
+        "Budget data shows actual outturn (utfall) from Statskontoret, "
+        "not the originally proposed budget. "
+        "Data from SCB and Statskontoret."
     ),
     lifespan=lifespan,
 )
@@ -200,11 +202,21 @@ EXPENDITURE_AREAS = [
 
 @mcp.tool()
 async def get_budget_overview(year: int) -> dict[str, Any]:
-    """Get the Swedish national budget overview for a given year.\n\n    Returns total expenditure, total income, balance, and all 27\n    expenditure areas with budget vs outcome amounts in MSEK.\n\n    Args:\n        year: Budget year (2006-2025 available).\n    """
+    """Get the Swedish national budget outturn for a given year.
+
+    Returns actual expenditure outturn (not proposed budget), total
+    income, balance, and all 27 expenditure areas in MSEK.
+    Source: Statskontoret arsutfall (official statistics).
+
+    Args:
+        year: Budget year (2006-2025 available).
+    """
     sk = _require_sk()
     overview = sk.get_budget_overview(year)
     return {
         "year": overview.year,
+        "data_type": "outturn",
+        "source": "Statskontoret",
         "total_expenditure_msek": overview.total_expenditure_msek,
         "total_income_msek": overview.total_income_msek,
         "balance_msek": overview.balance_msek,
@@ -216,26 +228,58 @@ async def get_budget_overview(year: int) -> dict[str, Any]:
 
 
 @mcp.tool()
-async def get_expenditure_area(area_id: str, year: int) -> list[dict[str, Any]]:
-    """Drill down into a specific expenditure area."""
+async def get_expenditure_area(area_id: str, year: int) -> dict[str, Any]:
+    """Drill down into a specific expenditure area (outturn data).
+
+    Returns all appropriations with both budget allocation and
+    actual outturn in MSEK. Source: Statskontoret.
+
+    Args:
+        area_id: Two-digit area ID (e.g. "06" for Defence).
+        year: Budget year.
+    """
     sk = _require_sk()
     rows = sk.get_expenditure_area(area_id, year)
-    return [
-        {"appropriation_id": r.appropriation_id, "appropriation_name": r.appropriation_name, "budget_msek": r.budget_msek, "amendment_budgets_msek": r.amendment_budgets_msek, "outcome_msek": r.outcome_msek, "opening_balance_msek": r.opening_balance_msek, "closing_balance_msek": r.closing_balance_msek}
-        for r in rows
-    ]
+    return {
+        "data_type": "outturn",
+        "source": "Statskontoret",
+        "area_id": area_id,
+        "year": year,
+        "appropriations": [
+            {"appropriation_id": r.appropriation_id, "appropriation_name": r.appropriation_name, "budget_msek": r.budget_msek, "amendment_budgets_msek": r.amendment_budgets_msek, "outcome_msek": r.outcome_msek, "opening_balance_msek": r.opening_balance_msek, "closing_balance_msek": r.closing_balance_msek}
+            for r in rows
+        ],
+    }
 
 
 @mcp.tool()
-async def compare_budgets(year_a: int, year_b: int) -> list[dict[str, Any]]:
-    """Compare budget outcomes between two years."""
+async def compare_budgets(year_a: int, year_b: int) -> dict[str, Any]:
+    """Compare budget outturn between two years.
+
+    Returns per-area comparison of actual expenditure outturn
+    with absolute delta (MSEK) and percentage change.
+
+    Args:
+        year_a: First year (baseline).
+        year_b: Second year (comparison).
+    """
     sk = _require_sk()
-    return sk.compare_budgets(year_a, year_b)
+    comparisons = sk.compare_budgets(year_a, year_b)
+    return {
+        "data_type": "outturn_comparison",
+        "source": "Statskontoret",
+        "year_a": year_a,
+        "year_b": year_b,
+        "areas": comparisons,
+    }
 
 
 @mcp.tool()
 async def sync_budget_data(year: int | None = None) -> dict[str, Any]:
-    """Download and parse latest budget data from Statskontoret.\n\n    Persists data atomically to SQLite cache via store_snapshot.\n    """
+    """Download and parse latest budget outturn from Statskontoret.
+
+    Persists data atomically to SQLite cache via store_snapshot.
+    """
     sk = _require_sk()
     cache = _require_cache()
     status = await sk.sync(year=year)
@@ -259,26 +303,30 @@ async def sync_budget_data(year: int | None = None) -> dict[str, Any]:
 
 @mcp.tool()
 async def get_revenue(year: int) -> dict[str, Any]:
-    """Get tax revenue breakdown for a specific year."""
+    """Get tax revenue breakdown for a specific year.
+
+    Returns total and per-category (labour, capital, consumption) in MSEK.
+    Source: SCB PxWeb API (SkatteIntakt).
+    """
     scb = _require_scb()
     rows = await scb.get_tax_revenue_summary(years=[year])
     result: dict[str, float | None] = {}
     for row in rows:
         key = {"101": "labour", "140": "capital", "160": "consumption", "180": "other", "190": "total"}.get(row.tax_type_code, row.tax_type_code)
         result[key] = row.amount_msek
-    return {"year": year, "revenue_msek": result}
+    return {"year": year, "data_type": "tax_revenue", "source": "SCB", "revenue_msek": result}
 
 
 @mcp.tool()
 async def get_revenue_timeseries(from_year: int = 2000, to_year: int = 2024) -> list[dict[str, Any]]:
-    """Get tax revenue timeseries grouped by category."""
+    """Get tax revenue timeseries grouped by category. Source: SCB."""
     scb = _require_scb()
     return await scb.get_revenue_timeseries(from_year=from_year, to_year=to_year)
 
 
 @mcp.tool()
 async def get_revenue_detail(year: int, tax_types: list[str] | None = None) -> list[dict[str, Any]]:
-    """Get detailed tax revenue for specific tax types."""
+    """Get detailed tax revenue for specific tax types. Source: SCB."""
     scb = _require_scb()
     rows = await scb.get_tax_revenue(years=[year], tax_types=tax_types)
     return [{"tax_type_code": r.tax_type_code, "tax_type_label": r.tax_type_label, "year": r.year, "amount_msek": r.amount_msek} for r in rows]
@@ -286,7 +334,7 @@ async def get_revenue_detail(year: int, tax_types: list[str] | None = None) -> l
 
 @mcp.tool()
 async def get_laffer_data(from_year: int = 1950, to_year: int = 2025) -> dict[str, Any]:
-    """Get Laffer curve data: total tax pressure vs GDP over time."""
+    """Get Laffer curve data: total tax pressure vs GDP over time. Source: SCB."""
     scb = _require_scb()
     points = await build_laffer_curve(scb, from_year=from_year, to_year=to_year)
     return laffer_to_chart_data(points)
@@ -294,7 +342,7 @@ async def get_laffer_data(from_year: int = 1950, to_year: int = 2025) -> dict[st
 
 @mcp.tool()
 async def get_laffer_timeseries(from_year: int = 1950, to_year: int = 2025) -> list[dict[str, Any]]:
-    """Get tax quota timeseries with reform annotations."""
+    """Get tax quota timeseries with reform annotations. Source: SCB."""
     scb = _require_scb()
     points = await build_laffer_curve(scb, from_year=from_year, to_year=to_year)
     return laffer_timeseries(points)
@@ -332,7 +380,7 @@ async def get_publication_schedule() -> dict[str, Any]:
 
 @mcp.tool()
 async def get_available_years() -> dict[str, Any]:
-    """Get list of years with loaded budget data."""
+    """Get list of years with loaded budget outturn data."""
     sk = _require_sk()
     return {"years": sk.get_available_years()}
 
