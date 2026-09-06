@@ -13,12 +13,14 @@ Startup behavior:
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any
 
+import httpx
 from fastmcp import FastMCP
 
 from .cache import BudgetCache
@@ -39,6 +41,21 @@ _scb: SCBClient | None = None
 _sk: StatskontoretClient | None = None
 _cache: BudgetCache | None = None
 
+# Exceptions that can occur during sync (network + disk)
+_SYNC_ERRORS = (
+    httpx.HTTPError,
+    httpx.TimeoutException,
+    OSError,
+)
+
+# Exceptions that can occur during cache load (data shape + db)
+_CACHE_LOAD_ERRORS = (
+    KeyError,
+    TypeError,
+    ValueError,
+    sqlite3.Error,
+)
+
 
 def _rows_to_dicts(rows: list) -> list[dict[str, Any]]:
     """Convert dataclass rows to dicts for cache storage."""
@@ -54,26 +71,41 @@ async def lifespan(server: FastMCP):
     _cache = BudgetCache()
 
     # Load from cache if fresh, otherwise sync
-    try:
-        if _cache.is_populated() and not _cache.needs_refresh():
+    if _cache.is_populated() and not _cache.needs_refresh():
+        try:
             _load_from_cache(_sk, _cache)
             print(
                 f"Loaded from cache ({_cache.db_path}), "
                 f"age: {_cache.cache_age_hours():.1f}h",
                 file=sys.stderr,
             )
-        else:
-            print("Cache empty or stale, syncing...", file=sys.stderr)
+        except _CACHE_LOAD_ERRORS as exc:
+            print(f"Cache load failed ({type(exc).__name__}): {exc}", file=sys.stderr)
+            print("Will sync fresh data instead.", file=sys.stderr)
+            _cache.invalidate()
             try:
                 await _sync_and_cache(_sk, _cache)
-                print("Sync complete, data cached.", file=sys.stderr)
-            except Exception as exc:
-                print(f"Sync failed: {exc}. Starting with empty data.", file=sys.stderr)
-                if _cache.is_populated():
+            except _SYNC_ERRORS as sync_exc:
+                print(f"Sync also failed: {sync_exc}. Starting empty.", file=sys.stderr)
+    else:
+        print("Cache empty or stale, syncing...", file=sys.stderr)
+        try:
+            await _sync_and_cache(_sk, _cache)
+            print("Sync complete, data cached.", file=sys.stderr)
+        except _SYNC_ERRORS as exc:
+            print(
+                f"Sync failed ({type(exc).__name__}): {exc}",
+                file=sys.stderr,
+            )
+            # Try stale cache as fallback
+            if _cache.is_populated():
+                try:
                     _load_from_cache(_sk, _cache)
                     print("Fell back to stale cache.", file=sys.stderr)
-    except Exception as exc:
-        print(f"Startup warning: {exc}", file=sys.stderr)
+                except _CACHE_LOAD_ERRORS as load_exc:
+                    print(f"Stale cache also unusable: {load_exc}", file=sys.stderr)
+            else:
+                print("No cached data available. Starting empty.", file=sys.stderr)
 
     try:
         yield
