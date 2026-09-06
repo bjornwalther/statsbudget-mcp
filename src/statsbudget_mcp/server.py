@@ -143,7 +143,7 @@ async def _sync_and_cache(sk: StatskontoretClient, cache: BudgetCache) -> None:
 
 mcp = FastMCP(
     "statsbudget-mcp",
-    description=(
+    instructions=(
         "Swedish national budget data: expenditure areas, tax revenue, "
         "Laffer curve analysis, and budget comparisons. "
         "Data from SCB, Statskontoret, and Riksdagen."
