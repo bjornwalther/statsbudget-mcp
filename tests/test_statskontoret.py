@@ -1,5 +1,9 @@
 """Tests for Statskontoret CSV client."""
 
+import os
+import tempfile
+import zipfile
+
 import pytest
 
 from statsbudget_mcp.statskontoret import (
@@ -7,20 +11,31 @@ from statsbudget_mcp.statskontoret import (
     BudgetOverview,
     ExpenditureRow,
     IncomeRow,
+    MAX_CSV_BYTES,
+    MAX_DOWNLOAD_BYTES,
     StatskontoretClient,
+    SyncError,
+    _classify_revision,
+    _is_allowed_host,
     _parse_swedish_decimal,
 )
 
 
 class TestSwedishDecimalParsing:
     def test_normal_value(self):
-        assert _parse_swedish_decimal("136,996") == pytest.approx(136.996)
+        assert _parse_swedish_decimal("136,996") == pytest.approx(
+            136.996,
+        )
 
     def test_negative_value(self):
-        assert _parse_swedish_decimal("-40,62704977") == pytest.approx(-40.62704977)
+        assert _parse_swedish_decimal(
+            "-40,62704977",
+        ) == pytest.approx(-40.62704977)
 
     def test_large_value(self):
-        assert _parse_swedish_decimal("1428000,12345678") == pytest.approx(1428000.12345678)
+        assert _parse_swedish_decimal(
+            "1428000,12345678",
+        ) == pytest.approx(1428000.12345678)
 
     def test_empty_string(self):
         assert _parse_swedish_decimal("") is None
@@ -32,26 +47,238 @@ class TestSwedishDecimalParsing:
         assert _parse_swedish_decimal("-") is None
 
     def test_whitespace_handling(self):
-        assert _parse_swedish_decimal(" 1 234,56 ") == pytest.approx(1234.56)
+        assert _parse_swedish_decimal(
+            " 1 234,56 ",
+        ) == pytest.approx(1234.56)
 
     def test_non_breaking_space(self):
-        assert _parse_swedish_decimal("1\xa0234,56") == pytest.approx(1234.56)
+        assert _parse_swedish_decimal(
+            "1\xa0234,56",
+        ) == pytest.approx(1234.56)
+
+
+class TestRevisionClassification:
+    """_classify_revision picks best income revision."""
+
+    def test_definitiv_highest_priority(self):
+        label, prio = _classify_revision(
+            "https://example.com?documentType=InkomstDefinitiv",
+            "CSV (Definitiva inkomster)",
+        )
+        assert label == "definitiv"
+        assert prio == 4
+
+    def test_preliminar_3(self):
+        label, prio = _classify_revision(
+            "https://example.com",
+            "CSV (Prelimin\u00e4r 3)",
+        )
+        assert label == "preliminar_3"
+        assert prio == 3
+
+    def test_preliminar_2(self):
+        label, prio = _classify_revision(
+            "https://example.com",
+            "CSV (Prelimin\u00e4r 2)",
+        )
+        assert label == "preliminar_2"
+        assert prio == 2
+
+    def test_preliminar_1(self):
+        label, prio = _classify_revision(
+            "https://example.com",
+            "CSV (Prelimin\u00e4r 1)",
+        )
+        assert label == "preliminar_1"
+        assert prio == 1
+
+    def test_unknown_fallback(self):
+        label, prio = _classify_revision(
+            "https://example.com",
+            "CSV (data)",
+        )
+        assert label == "unknown"
+        assert prio == 0
+
+    def test_definitiv_beats_preliminar(self):
+        """Higher priority number wins."""
+        _, p_def = _classify_revision("", "Definitiva inkomster")
+        _, p_p2 = _classify_revision("", "Prelimin\u00e4r 2")
+        _, p_p1 = _classify_revision("", "Prelimin\u00e4r 1")
+        assert p_def > p_p2 > p_p1
+
+    def test_documenttype_param_used(self):
+        """Revision detected from URL query param."""
+        label, prio = _classify_revision(
+            "https://x.se?documentType=InkomstPreliminar2",
+            "CSV",
+        )
+        assert prio == 2
+
+
+class TestHostAllowlist:
+    """_is_allowed_host permits only statskontoret.se."""
+
+    def test_www_allowed(self):
+        assert _is_allowed_host(
+            "https://www.statskontoret.se/foo",
+        ) is True
+
+    def test_bare_domain_allowed(self):
+        assert _is_allowed_host(
+            "https://statskontoret.se/bar",
+        ) is True
+
+    def test_evil_domain_blocked(self):
+        assert _is_allowed_host(
+            "https://evil.com/foo",
+        ) is False
+
+    def test_subdomain_blocked(self):
+        assert _is_allowed_host(
+            "https://api.statskontoret.se/foo",
+        ) is False
+
+    def test_empty_blocked(self):
+        assert _is_allowed_host("") is False
+
+    def test_garbage_blocked(self):
+        assert _is_allowed_host("not-a-url") is False
+
+
+class TestSizeLimitConstants:
+    """Size limit constants exist with sane values."""
+
+    def test_download_limit_exists(self):
+        assert isinstance(MAX_DOWNLOAD_BYTES, int)
+        assert MAX_DOWNLOAD_BYTES > 1 * 1024 * 1024
+
+    def test_csv_limit_exists(self):
+        assert isinstance(MAX_CSV_BYTES, int)
+        assert MAX_CSV_BYTES >= MAX_DOWNLOAD_BYTES
+
+
+class TestZipSizeGuard:
+    """_extract_csv_from_zip enforces MAX_CSV_BYTES."""
+
+    def _make_zip(self, csv_content, name="data.csv"):
+        tmp = tempfile.NamedTemporaryFile(
+            suffix=".zip", delete=False,
+        )
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(name, csv_content)
+        tmp.close()
+        return tmp.name
+
+    def test_small_csv_passes(self):
+        path = self._make_zip("col1;col2\nval1;val2\n")
+        try:
+            from pathlib import Path
+
+            client = StatskontoretClient()
+            result = client._extract_csv_from_zip(Path(path))
+            assert result is not None
+            assert "col1" in result
+        finally:
+            os.unlink(path)
+
+    def test_oversized_csv_rejected(self):
+        import statsbudget_mcp.statskontoret as sk
+
+        original = sk.MAX_CSV_BYTES
+        try:
+            sk.MAX_CSV_BYTES = 10
+            path = self._make_zip("a" * 100)
+            try:
+                from pathlib import Path
+
+                client = StatskontoretClient()
+                result = client._extract_csv_from_zip(Path(path))
+                assert result is None
+            finally:
+                os.unlink(path)
+        finally:
+            sk.MAX_CSV_BYTES = original
+
+    def test_bad_zip_returns_none(self):
+        tmp = tempfile.NamedTemporaryFile(
+            suffix=".zip", delete=False,
+        )
+        tmp.write(b"not a zip")
+        tmp.close()
+        try:
+            from pathlib import Path
+
+            client = StatskontoretClient()
+            result = client._extract_csv_from_zip(Path(tmp.name))
+            assert result is None
+        finally:
+            os.unlink(tmp.name)
+
+    def test_zip_without_csv_returns_none(self):
+        tmp = tempfile.NamedTemporaryFile(
+            suffix=".zip", delete=False,
+        )
+        with zipfile.ZipFile(tmp, "w") as zf:
+            zf.writestr("readme.txt", "no csv")
+        tmp.close()
+        try:
+            from pathlib import Path
+
+            client = StatskontoretClient()
+            result = client._extract_csv_from_zip(Path(tmp.name))
+            assert result is None
+        finally:
+            os.unlink(tmp.name)
+
+
+class TestSyncError:
+    """SyncError exception carries diagnostic attributes."""
+
+    def test_is_exception(self):
+        assert issubclass(SyncError, Exception)
+
+    def test_attributes(self):
+        err = SyncError(
+            "missing income",
+            has_expenditure=True,
+            has_income=False,
+        )
+        assert err.has_expenditure is True
+        assert err.has_income is False
+        assert "missing income" in str(err)
+
+    def test_both_missing(self):
+        err = SyncError(
+            "both",
+            has_expenditure=False,
+            has_income=False,
+        )
+        assert not err.has_expenditure
+        assert not err.has_income
 
 
 class TestExpenditureCsvParsing:
     SAMPLE_CSV = (
         "Utgiftsomr\u00e5de;Utgiftsomr\u00e5desnamn;Anslag;Anslagsnamn;"
-        "Utgiftsomr\u00e5de utfalls\u00e5r;Utgiftsomr\u00e5desnamn utfalls\u00e5r;"
+        "Utgiftsomr\u00e5de utfalls\u00e5r;"
+        "Utgiftsomr\u00e5desnamn utfalls\u00e5r;"
         "Anslag utfalls\u00e5r;Anslagsnamn utfalls\u00e5r;"
-        "\u00c5r;Ing\u00e5ende \u00f6verf\u00f6ringsbelopp;Statens budget;"
+        "\u00c5r;Ing\u00e5ende \u00f6verf\u00f6ringsbelopp;"
+        "Statens budget;"
         "\u00c4ndringsbudgetar;Indragningar;"
         "Utnyttjad del av medgivet\u00f6verskridande;Utfall;"
-        "Anslagskredit;Utg\u00e5ende \u00f6verf\u00f6ringsbelopp\n"
-        "01;Rikets styrelse;0101001;Kungliga hov- och slottsstaten;"
-        "01;Rikets styrelse;0101001;Kungliga hov- och slottsstaten;"
+        "Anslagskredit;"
+        "Utg\u00e5ende \u00f6verf\u00f6ringsbelopp\n"
+        "01;Rikets styrelse;0101001;"
+        "Kungliga hov- och slottsstaten;"
+        "01;Rikets styrelse;0101001;"
+        "Kungliga hov- och slottsstaten;"
         "2024;0,5;160,996;0;0;0;158,244;4,83;3,252\n"
-        "06;F\u00f6rsvar och samh\u00e4llets krisberedskap;0601001;F\u00f6rbandsverksamhet;"
-        "06;F\u00f6rsvar och samh\u00e4llets krisberedskap;0601001;F\u00f6rbandsverksamhet;"
+        "06;F\u00f6rsvar och samh\u00e4llets krisberedskap;"
+        "0601001;F\u00f6rbandsverksamhet;"
+        "06;F\u00f6rsvar och samh\u00e4llets krisberedskap;"
+        "0601001;F\u00f6rbandsverksamhet;"
         "2024;1200,0;85000,0;500,0;0;0;84500,0;2550,0;1200,0\n"
     )
 
@@ -83,16 +310,24 @@ class TestExpenditureCsvParsing:
 
 class TestIncomeCsvParsing:
     SAMPLE_CSV = (
-        "Inkomsttyp;Inkomsttypsnamn;Inkomsthuvudgrupp;Inkomsthuvudgruppsnamn;"
-        "Inkomsttitelgrupp;Inkomsttitelgruppsnamn;Inkomsttitel;Inkomsttitelsnamn;"
-        "Inkomsttyp utfalls\u00e5r;Inkomsttypsnamn utfalls\u00e5r;"
-        "Inkomsthuvudgrupp utfalls\u00e5r;Inkomsthuvudgruppsnamn utfalls\u00e5r;"
-        "Inkomsttitelgrupp utfalls\u00e5r;Inkomsttitelgruppsnamn utfalls\u00e5r;"
-        "Inkomsttitel utfalls\u00e5r;Inkomsttitelsnamn utfalls\u00e5r;"
+        "Inkomsttyp;Inkomsttypsnamn;"
+        "Inkomsthuvudgrupp;Inkomsthuvudgruppsnamn;"
+        "Inkomsttitelgrupp;Inkomsttitelgruppsnamn;"
+        "Inkomsttitel;Inkomsttitelsnamn;"
+        "Inkomsttyp utfalls\u00e5r;"
+        "Inkomsttypsnamn utfalls\u00e5r;"
+        "Inkomsthuvudgrupp utfalls\u00e5r;"
+        "Inkomsthuvudgruppsnamn utfalls\u00e5r;"
+        "Inkomsttitelgrupp utfalls\u00e5r;"
+        "Inkomsttitelgruppsnamn utfalls\u00e5r;"
+        "Inkomsttitel utfalls\u00e5r;"
+        "Inkomsttitelsnamn utfalls\u00e5r;"
         "\u00c5r;Statens budget;Utfall\n"
-        "1000;Statens skatteinkomster;1100;Direkta skatter p\u00e5 arbete;"
+        "1000;Statens skatteinkomster;"
+        "1100;Direkta skatter p\u00e5 arbete;"
         "1110;Inkomstskatter;1111;Statlig inkomstskatt;"
-        "1000;Statens skatteinkomster;1100;Direkta skatter p\u00e5 arbete;"
+        "1000;Statens skatteinkomster;"
+        "1100;Direkta skatter p\u00e5 arbete;"
         "1110;Inkomstskatter;1111;Statlig inkomstskatt;"
         "2024;51380,859539;50805,94943\n"
     )
@@ -119,48 +354,89 @@ class TestBudgetOverview:
     def test_overview_aggregation(self):
         client = StatskontoretClient()
         client._expenditure_data = [
-            ExpenditureRow("01", "Rikets styrelse", "0101001", "Hovet", 2024, 160.0, None, 158.0, None, None),
-            ExpenditureRow("01", "Rikets styrelse", "0101002", "Riksdagen", 2024, 2000.0, None, 1950.0, None, None),
-            ExpenditureRow("06", "F\u00f6rsvar", "0601001", "F\u00f6rband", 2024, 85000.0, None, 84500.0, None, None),
+            ExpenditureRow(
+                "01", "Rikets styrelse", "0101001",
+                "Hovet", 2024, 160.0, None, 158.0, None, None,
+            ),
+            ExpenditureRow(
+                "01", "Rikets styrelse", "0101002",
+                "Riksdagen", 2024, 2000.0, None, 1950.0,
+                None, None,
+            ),
+            ExpenditureRow(
+                "06", "F\u00f6rsvar", "0601001",
+                "F\u00f6rband", 2024, 85000.0, None,
+                84500.0, None, None,
+            ),
         ]
         client._income_data = [
-            IncomeRow("1000", "Skatter", "1100", "Arbete", "1111", "Statlig", 2024, 51000.0, 50000.0),
-            IncomeRow("2000", "Inkomster", "2100", "\u00d6vrigt", "2111", "Div", 2024, 40000.0, 38000.0),
+            IncomeRow(
+                "1000", "Skatter", "1100", "Arbete",
+                "1111", "Statlig", 2024, 51000.0, 50000.0,
+            ),
+            IncomeRow(
+                "2000", "Inkomster", "2100",
+                "\u00d6vrigt", "2111", "Div",
+                2024, 40000.0, 38000.0,
+            ),
         ]
 
         overview = client.get_budget_overview(2024)
         assert isinstance(overview, BudgetOverview)
         assert overview.year == 2024
-        assert overview.total_expenditure_msek == pytest.approx(158.0 + 1950.0 + 84500.0)
-        assert overview.total_income_msek == pytest.approx(50000.0 + 38000.0)
+        assert overview.total_expenditure_msek == pytest.approx(
+            158.0 + 1950.0 + 84500.0,
+        )
+        assert overview.total_income_msek == pytest.approx(
+            50000.0 + 38000.0,
+        )
         assert len(overview.areas) == 2
         assert overview.areas[0].area_id == "01"
-        assert overview.areas[0].outcome_msek == pytest.approx(158.0 + 1950.0)
+        assert overview.areas[0].outcome_msek == pytest.approx(
+            158.0 + 1950.0,
+        )
 
 
 class TestBudgetComparison:
     def test_compare_two_years(self):
         client = StatskontoretClient()
         client._expenditure_data = [
-            ExpenditureRow("01", "Rikets styrelse", "0101001", "X", 2023, 100.0, None, 95.0, None, None),
-            ExpenditureRow("01", "Rikets styrelse", "0101001", "X", 2024, 110.0, None, 108.0, None, None),
+            ExpenditureRow(
+                "01", "Rikets styrelse", "0101001", "X",
+                2023, 100.0, None, 95.0, None, None,
+            ),
+            ExpenditureRow(
+                "01", "Rikets styrelse", "0101001", "X",
+                2024, 110.0, None, 108.0, None, None,
+            ),
         ]
 
         result = client.compare_budgets(2023, 2024)
         assert len(result) == 1
         assert result[0]["area_id"] == "01"
         assert result[0]["delta_msek"] == pytest.approx(13.0)
-        assert result[0]["delta_pct"] == pytest.approx(13.68, rel=0.01)
+        assert result[0]["delta_pct"] == pytest.approx(
+            13.68, rel=0.01,
+        )
 
 
 class TestAvailableYears:
     def test_returns_sorted_years(self):
         client = StatskontoretClient()
         client._expenditure_data = [
-            ExpenditureRow("01", "X", "Y", "Z", 2022, None, None, None, None, None),
-            ExpenditureRow("01", "X", "Y", "Z", 2024, None, None, None, None, None),
+            ExpenditureRow(
+                "01", "X", "Y", "Z", 2022,
+                None, None, None, None, None,
+            ),
+            ExpenditureRow(
+                "01", "X", "Y", "Z", 2024,
+                None, None, None, None, None,
+            ),
         ]
         client._income_data = [
-            IncomeRow("1000", "X", "1100", "Y", "1111", "Z", 2023, None, None),
+            IncomeRow(
+                "1000", "X", "1100", "Y",
+                "1111", "Z", 2023, None, None,
+            ),
         ]
         assert client.get_available_years() == [2022, 2023, 2024]
