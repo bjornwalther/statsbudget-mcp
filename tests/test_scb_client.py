@@ -3,8 +3,8 @@
 import pytest
 
 from statsbudget_mcp.scb_client import (
-    SCBClient,
     TAX_TYPE_LABELS,
+    SCBClient,
     TaxQuotaRow,
     TaxRevenueRow,
 )

@@ -2,30 +2,27 @@
 
 import pytest
 
+# Tool functions are module-level, imported to verify they exist
 from statsbudget_mcp.server import (
     EXPENDITURE_AREAS,
     _require_cache,
     _require_scb,
     _require_sk,
-    mcp,
-)
-
-# Tool functions are module-level, imported to verify they exist
-from statsbudget_mcp.server import (
-    get_budget_overview,
-    get_expenditure_area,
     compare_budgets,
-    sync_budget_data,
-    get_revenue,
-    get_revenue_timeseries,
-    get_revenue_detail,
+    get_available_years,
+    get_budget_overview,
+    get_cache_stats,
+    get_expenditure_area,
     get_laffer_data,
     get_laffer_timeseries,
-    get_tax_reforms,
-    get_sync_status,
     get_publication_schedule,
-    get_available_years,
-    get_cache_stats,
+    get_revenue,
+    get_revenue_detail,
+    get_revenue_timeseries,
+    get_sync_status,
+    get_tax_reforms,
+    mcp,
+    sync_budget_data,
 )
 
 

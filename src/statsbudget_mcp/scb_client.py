@@ -149,7 +149,7 @@ class SCBClient:
     async def close(self) -> None:
         await self._client.aclose()
 
-    async def __aenter__(self) -> "SCBClient":
+    async def __aenter__(self) -> SCBClient:
         return self
 
     async def __aexit__(self, *args: Any) -> None:

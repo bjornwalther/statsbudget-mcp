@@ -178,7 +178,7 @@ def format_budget_flow(
         if i == mid - 1:
             connector = " \u2500\u2500\u2510 \u250c\u2500\u2500 "
         elif i == mid:
-            connector = f" \u2500\u2500\u253c\u2500\u253c\u2500\u2500 "
+            connector = " \u2500\u2500\u253c\u2500\u253c\u2500\u2500 "
         elif i == mid + 1:
             connector = " \u2500\u2500\u2518 \u2514\u2500\u2500 "
         elif mid - 1 < i < mid + 1:

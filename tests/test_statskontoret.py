@@ -7,12 +7,11 @@ import zipfile
 import pytest
 
 from statsbudget_mcp.statskontoret import (
-    AreaSummary,
+    MAX_CSV_BYTES,
+    MAX_DOWNLOAD_BYTES,
     BudgetOverview,
     ExpenditureRow,
     IncomeRow,
-    MAX_CSV_BYTES,
-    MAX_DOWNLOAD_BYTES,
     StatskontoretClient,
     SyncError,
     _classify_revision,

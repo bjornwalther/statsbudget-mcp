@@ -2,10 +2,9 @@
 
 import os
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from statsbudget_mcp.cache import BudgetCache
-
 
 _SAMPLE_EXPENDITURE = [
     {
@@ -105,7 +104,7 @@ class TestMeta:
     def test_cache_age_after_sync(self):
         with tempfile.TemporaryDirectory() as td:
             cache = BudgetCache(db_path=os.path.join(td, "test.db"))
-            now = datetime.now(timezone.utc).isoformat(
+            now = datetime.now(UTC).isoformat(
                 timespec="seconds",
             )
             cache.set_meta("last_sync_utc", now)

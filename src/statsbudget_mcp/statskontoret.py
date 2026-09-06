@@ -24,7 +24,7 @@ import re
 import sys
 import zipfile
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -182,11 +182,11 @@ def _parse_int_safe(value: str) -> int:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _next_expected_update() -> str:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     year = now.year
     if now.month < 3:
         return f"{year}-03-15"
@@ -340,7 +340,7 @@ class StatskontoretClient:
     async def close(self) -> None:
         await self._client.aclose()
 
-    async def __aenter__(self) -> "StatskontoretClient":
+    async def __aenter__(self) -> StatskontoretClient:
         return self
 
     async def __aexit__(self, *args: Any) -> None:

@@ -20,10 +20,9 @@ from __future__ import annotations
 
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-
 
 SCHEMA_VERSION = "1"
 
@@ -197,7 +196,7 @@ class BudgetCache:
             return None
         try:
             synced = datetime.fromisoformat(last)
-            delta = datetime.now(timezone.utc) - synced
+            delta = datetime.now(UTC) - synced
             return delta.total_seconds() / 3600
         except (ValueError, TypeError):
             return None
@@ -238,7 +237,7 @@ class BudgetCache:
         but snapshot_complete is set to false.
         """
         if sync_utc is None:
-            sync_utc = datetime.now(timezone.utc).isoformat(
+            sync_utc = datetime.now(UTC).isoformat(
                 timespec="seconds",
             )
 
@@ -413,7 +412,7 @@ class BudgetCache:
 
     def store_scb_revenue(self, rows: list[dict[str, Any]]) -> int:
         self._conn.execute("DELETE FROM scb_revenue")
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        now = datetime.now(UTC).isoformat(timespec="seconds")
         self._conn.executemany(
             "INSERT INTO scb_revenue VALUES (?,?,?,?,?)",
             [
@@ -448,7 +447,7 @@ class BudgetCache:
 
     def store_scb_quota(self, rows: list[dict[str, Any]]) -> int:
         self._conn.execute("DELETE FROM scb_quota")
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        now = datetime.now(UTC).isoformat(timespec="seconds")
         self._conn.executemany(
             "INSERT INTO scb_quota VALUES (?,?,?,?,?,?)",
             [
