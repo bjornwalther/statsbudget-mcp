@@ -14,7 +14,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "fastmcp>=2.0.0",
+    "fastmcp>=2.0.0,<5",
     "httpx>=0.27.0",
 ]
 
@@ -41,3 +41,6 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "A", "SIM"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = [
+    "integration: tests that hit live external APIs (SCB, Statskontoret)",
+]
