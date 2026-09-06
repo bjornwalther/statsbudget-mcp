@@ -9,19 +9,22 @@ Schema:
 - income: parsed IncomeRow data
 - scb_revenue: tax revenue snapshots
 - scb_quota: tax quota snapshots
-- meta: sync metadata (last sync time, source dates)
+- meta: sync metadata (last sync time, source dates, schema version)
 
 The cache is stored in ~/.statsbudget-cache/statsbudget.db by default.
+Schema version is checked on load; mismatches are treated as cache misses.
 """
 
 from __future__ import annotations
 
-import json
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+
+SCHEMA_VERSION = "1"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS expenditure (
@@ -77,9 +80,30 @@ CREATE INDEX IF NOT EXISTS idx_scb_revenue_year ON scb_revenue(year);
 CREATE INDEX IF NOT EXISTS idx_scb_quota_year ON scb_quota(year);
 """
 
+_EXPENDITURE_REQUIRED_KEYS = {"expenditure_area_id", "expenditure_area_name", "appropriation_id", "appropriation_name", "year"}
+_INCOME_REQUIRED_KEYS = {"income_type", "income_type_name", "income_main_group", "income_main_group_name", "income_title", "income_title_name", "year"}
+
+
+def _validate_rows(rows: list[dict[str, Any]], required_keys: set[str]) -> bool:
+    """Validate that all rows contain required keys with correct types."""
+    if not rows:
+        return True
+    for row in rows:
+        if not isinstance(row, dict):
+            return False
+        if not required_keys.issubset(row.keys()):
+            return False
+        if not isinstance(row.get("year"), (int, float)):
+            return False
+    return True
+
 
 class BudgetCache:
     """SQLite-backed cache for budget data.
+
+    Schema-versioned: data is only loaded if the stored schema version
+    matches SCHEMA_VERSION exactly. Mismatches are treated as cache
+    misses (data is discarded, not migrated).
 
     Usage:
         cache = BudgetCache()
@@ -105,8 +129,15 @@ class BudgetCache:
     def db_path(self) -> Path:
         return self._db_path
 
+    def _schema_valid(self) -> bool:
+        """Check if cached data matches current schema version."""
+        stored = self.get_meta("schema_version")
+        return stored == SCHEMA_VERSION
+
     def is_populated(self) -> bool:
-        """Check if cache has any data."""
+        """Check if cache has valid data (correct schema + rows exist)."""
+        if not self._schema_valid():
+            return False
         cur = self._conn.execute("SELECT COUNT(*) FROM expenditure")
         return cur.fetchone()[0] > 0
 
@@ -136,10 +167,18 @@ class BudgetCache:
 
     def needs_refresh(self, max_age_hours: float = 24 * 7) -> bool:
         """Check if cache is stale (default: older than 1 week)."""
+        if not self._schema_valid():
+            return True
         age = self.cache_age_hours()
         if age is None:
             return True
         return age > max_age_hours
+
+    def invalidate(self) -> None:
+        """Clear all cached data (schema mismatch recovery)."""
+        for table in ("expenditure", "income", "scb_revenue", "scb_quota", "meta"):
+            self._conn.execute(f"DELETE FROM {table}")
+        self._conn.commit()
 
     # -- Expenditure --
 
@@ -159,15 +198,24 @@ class BudgetCache:
                 for r in rows
             ],
         )
+        self.set_meta("schema_version", SCHEMA_VERSION)
         self._conn.commit()
         return len(rows)
 
     def load_expenditure(self, year: int | None = None) -> list[dict[str, Any]]:
+        """Load expenditure rows. Returns [] if schema version mismatches."""
+        if not self._schema_valid():
+            print("Cache schema mismatch, treating as empty.", file=sys.stderr)
+            return []
         if year is not None:
             cur = self._conn.execute("SELECT * FROM expenditure WHERE year = ?", (year,))
         else:
             cur = self._conn.execute("SELECT * FROM expenditure")
-        return [dict(row) for row in cur.fetchall()]
+        rows = [dict(row) for row in cur.fetchall()]
+        if not _validate_rows(rows, _EXPENDITURE_REQUIRED_KEYS):
+            print("Cache expenditure data malformed, treating as empty.", file=sys.stderr)
+            return []
+        return rows
 
     # -- Income --
 
@@ -185,15 +233,24 @@ class BudgetCache:
                 for r in rows
             ],
         )
+        self.set_meta("schema_version", SCHEMA_VERSION)
         self._conn.commit()
         return len(rows)
 
     def load_income(self, year: int | None = None) -> list[dict[str, Any]]:
+        """Load income rows. Returns [] if schema version mismatches."""
+        if not self._schema_valid():
+            print("Cache schema mismatch, treating as empty.", file=sys.stderr)
+            return []
         if year is not None:
             cur = self._conn.execute("SELECT * FROM income WHERE year = ?", (year,))
         else:
             cur = self._conn.execute("SELECT * FROM income")
-        return [dict(row) for row in cur.fetchall()]
+        rows = [dict(row) for row in cur.fetchall()]
+        if not _validate_rows(rows, _INCOME_REQUIRED_KEYS):
+            print("Cache income data malformed, treating as empty.", file=sys.stderr)
+            return []
+        return rows
 
     # -- SCB Revenue --
 
@@ -204,10 +261,13 @@ class BudgetCache:
             "INSERT INTO scb_revenue VALUES (?,?,?,?,?)",
             [(r["tax_type_code"], r["tax_type_label"], r["year"], r.get("amount_msek"), now) for r in rows],
         )
+        self.set_meta("schema_version", SCHEMA_VERSION)
         self._conn.commit()
         return len(rows)
 
     def load_scb_revenue(self, year: int | None = None) -> list[dict[str, Any]]:
+        if not self._schema_valid():
+            return []
         if year is not None:
             cur = self._conn.execute("SELECT * FROM scb_revenue WHERE year = ?", (year,))
         else:
@@ -223,10 +283,13 @@ class BudgetCache:
             "INSERT INTO scb_quota VALUES (?,?,?,?,?,?)",
             [(r["tax_type_code"], r["tax_type_label"], r["year"], r.get("amount_msek"), r.get("share_of_gdp"), now) for r in rows],
         )
+        self.set_meta("schema_version", SCHEMA_VERSION)
         self._conn.commit()
         return len(rows)
 
     def load_scb_quota(self, year: int | None = None) -> list[dict[str, Any]]:
+        if not self._schema_valid():
+            return []
         if year is not None:
             cur = self._conn.execute("SELECT * FROM scb_quota WHERE year = ?", (year,))
         else:
@@ -249,6 +312,8 @@ class BudgetCache:
 
         return {
             "db_path": str(self._db_path),
+            "schema_version": SCHEMA_VERSION,
+            "schema_valid": self._schema_valid(),
             "row_counts": counts,
             "total_rows": sum(counts.values()),
             "years_covered": sorted(years),
