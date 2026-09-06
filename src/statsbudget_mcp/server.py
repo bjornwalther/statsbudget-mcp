@@ -17,7 +17,6 @@ import sqlite3
 import sys
 from contextlib import asynccontextmanager
 from dataclasses import asdict
-from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -77,13 +76,19 @@ async def lifespan(server: FastMCP):
                 file=sys.stderr,
             )
         except _CACHE_LOAD_ERRORS as exc:
-            print(f"Cache load failed ({type(exc).__name__}): {exc}", file=sys.stderr)
+            print(
+                f"Cache load failed ({type(exc).__name__}): {exc}",
+                file=sys.stderr,
+            )
             print("Will sync fresh data instead.", file=sys.stderr)
             _cache.invalidate()
             try:
                 await _sync_and_cache(_sk, _cache)
             except _SYNC_ERRORS as sync_exc:
-                print(f"Sync also failed: {sync_exc}. Starting empty.", file=sys.stderr)
+                print(
+                    f"Sync also failed: {sync_exc}. Starting empty.",
+                    file=sys.stderr,
+                )
     else:
         print("Cache empty or stale, syncing...", file=sys.stderr)
         try:
@@ -99,9 +104,15 @@ async def lifespan(server: FastMCP):
                     _load_from_cache(_sk, _cache)
                     print("Fell back to stale cache.", file=sys.stderr)
                 except _CACHE_LOAD_ERRORS as load_exc:
-                    print(f"Stale cache also unusable: {load_exc}", file=sys.stderr)
+                    print(
+                        f"Stale cache also unusable: {load_exc}",
+                        file=sys.stderr,
+                    )
             else:
-                print("No cached data available. Starting empty.", file=sys.stderr)
+                print(
+                    "No cached data available. Starting empty.",
+                    file=sys.stderr,
+                )
 
     try:
         yield
@@ -129,7 +140,9 @@ def _load_from_cache(sk: StatskontoretClient, cache: BudgetCache) -> None:
     ]
 
 
-async def _sync_and_cache(sk: StatskontoretClient, cache: BudgetCache) -> None:
+async def _sync_and_cache(
+    sk: StatskontoretClient, cache: BudgetCache,
+) -> None:
     """Sync from Statskontoret and persist to cache atomically."""
     await sk.sync()
     cache.store_snapshot(
@@ -159,7 +172,9 @@ def _require_scb() -> SCBClient:
 
 def _require_sk() -> StatskontoretClient:
     if _sk is None:
-        raise RuntimeError("Statskontoret client not initialized. Server not started?")
+        raise RuntimeError(
+            "Statskontoret client not initialized. Server not started?"
+        )
     return _sk
 
 
@@ -187,7 +202,8 @@ EXPENDITURE_AREAS = [
     ("15", "Studiest\u00f6d"),
     ("16", "Utbildning och universitetsforskning"),
     ("17", "Kultur, medier, trossamfund och fritid"),
-    ("18", "Samh\u00e4llsplanering, bostadsf\u00f6rs\u00f6rjning och byggande samt konsumentpolitik"),
+    ("18", "Samh\u00e4llsplanering, bostadsf\u00f6rs\u00f6rjning"
+     " och byggande samt konsumentpolitik"),
     ("19", "Regional utveckling"),
     ("20", "Allm\u00e4n milj\u00f6- och naturv\u00e5rd"),
     ("21", "Energi"),
@@ -198,6 +214,14 @@ EXPENDITURE_AREAS = [
     ("26", "Statsskulds\u00e4ntor m.m."),
     ("27", "Avgiften till Europeiska unionen"),
 ]
+
+_REVENUE_CATEGORY_MAP = {
+    "101": "labour",
+    "140": "capital",
+    "160": "consumption",
+    "180": "other",
+    "190": "total",
+}
 
 
 @mcp.tool()
@@ -221,14 +245,22 @@ async def get_budget_overview(year: int) -> dict[str, Any]:
         "total_income_msek": overview.total_income_msek,
         "balance_msek": overview.balance_msek,
         "areas": [
-            {"area_id": a.area_id, "area_name": a.area_name, "budget_msek": a.budget_msek, "outcome_msek": a.outcome_msek, "delta_msek": a.delta_msek}
+            {
+                "area_id": a.area_id,
+                "area_name": a.area_name,
+                "budget_msek": a.budget_msek,
+                "outcome_msek": a.outcome_msek,
+                "delta_msek": a.delta_msek,
+            }
             for a in overview.areas
         ],
     }
 
 
 @mcp.tool()
-async def get_expenditure_area(area_id: str, year: int) -> dict[str, Any]:
+async def get_expenditure_area(
+    area_id: str, year: int,
+) -> dict[str, Any]:
     """Drill down into a specific expenditure area (outturn data).
 
     Returns all appropriations with both budget allocation and
@@ -246,14 +278,24 @@ async def get_expenditure_area(area_id: str, year: int) -> dict[str, Any]:
         "area_id": area_id,
         "year": year,
         "appropriations": [
-            {"appropriation_id": r.appropriation_id, "appropriation_name": r.appropriation_name, "budget_msek": r.budget_msek, "amendment_budgets_msek": r.amendment_budgets_msek, "outcome_msek": r.outcome_msek, "opening_balance_msek": r.opening_balance_msek, "closing_balance_msek": r.closing_balance_msek}
+            {
+                "appropriation_id": r.appropriation_id,
+                "appropriation_name": r.appropriation_name,
+                "budget_msek": r.budget_msek,
+                "amendment_budgets_msek": r.amendment_budgets_msek,
+                "outcome_msek": r.outcome_msek,
+                "opening_balance_msek": r.opening_balance_msek,
+                "closing_balance_msek": r.closing_balance_msek,
+            }
             for r in rows
         ],
     }
 
 
 @mcp.tool()
-async def compare_budgets(year_a: int, year_b: int) -> dict[str, Any]:
+async def compare_budgets(
+    year_a: int, year_b: int,
+) -> dict[str, Any]:
     """Compare budget outturn between two years.
 
     Returns per-area comparison of actual expenditure outturn
@@ -275,7 +317,9 @@ async def compare_budgets(year_a: int, year_b: int) -> dict[str, Any]:
 
 
 @mcp.tool()
-async def sync_budget_data(year: int | None = None) -> dict[str, Any]:
+async def sync_budget_data(
+    year: int | None = None,
+) -> dict[str, Any]:
     """Download and parse latest budget outturn from Statskontoret.
 
     Persists data atomically to SQLite cache via store_snapshot.
@@ -295,7 +339,13 @@ async def sync_budget_data(year: int | None = None) -> dict[str, Any]:
         "cache_stats": cache.get_stats(),
         "snapshot": result,
         "sources": [
-            {"source": s.source, "last_synced_at": s.last_synced_at, "source_last_updated": s.source_last_updated, "files_downloaded": s.files_downloaded, "years_covered": s.years_covered}
+            {
+                "source": s.source,
+                "last_synced_at": s.last_synced_at,
+                "source_last_updated": s.source_last_updated,
+                "files_downloaded": s.files_downloaded,
+                "years_covered": s.years_covered,
+            }
             for s in status.sources
         ],
     }
@@ -305,46 +355,78 @@ async def sync_budget_data(year: int | None = None) -> dict[str, Any]:
 async def get_revenue(year: int) -> dict[str, Any]:
     """Get tax revenue breakdown for a specific year.
 
-    Returns total and per-category (labour, capital, consumption) in MSEK.
-    Source: SCB PxWeb API (SkatteIntakt).
+    Returns total and per-category (labour, capital, consumption)
+    in MSEK. Source: SCB PxWeb API (SkatteIntakt).
     """
     scb = _require_scb()
     rows = await scb.get_tax_revenue_summary(years=[year])
     result: dict[str, float | None] = {}
     for row in rows:
-        key = {"101": "labour", "140": "capital", "160": "consumption", "180": "other", "190": "total"}.get(row.tax_type_code, row.tax_type_code)
+        key = _REVENUE_CATEGORY_MAP.get(
+            row.tax_type_code, row.tax_type_code,
+        )
         result[key] = row.amount_msek
-    return {"year": year, "data_type": "tax_revenue", "source": "SCB", "revenue_msek": result}
+    return {
+        "year": year,
+        "data_type": "tax_revenue",
+        "source": "SCB",
+        "revenue_msek": result,
+    }
 
 
 @mcp.tool()
-async def get_revenue_timeseries(from_year: int = 2000, to_year: int = 2024) -> list[dict[str, Any]]:
+async def get_revenue_timeseries(
+    from_year: int = 2000, to_year: int = 2024,
+) -> list[dict[str, Any]]:
     """Get tax revenue timeseries grouped by category. Source: SCB."""
     scb = _require_scb()
-    return await scb.get_revenue_timeseries(from_year=from_year, to_year=to_year)
+    return await scb.get_revenue_timeseries(
+        from_year=from_year, to_year=to_year,
+    )
 
 
 @mcp.tool()
-async def get_revenue_detail(year: int, tax_types: list[str] | None = None) -> list[dict[str, Any]]:
+async def get_revenue_detail(
+    year: int, tax_types: list[str] | None = None,
+) -> list[dict[str, Any]]:
     """Get detailed tax revenue for specific tax types. Source: SCB."""
     scb = _require_scb()
     rows = await scb.get_tax_revenue(years=[year], tax_types=tax_types)
-    return [{"tax_type_code": r.tax_type_code, "tax_type_label": r.tax_type_label, "year": r.year, "amount_msek": r.amount_msek} for r in rows]
+    return [
+        {
+            "tax_type_code": r.tax_type_code,
+            "tax_type_label": r.tax_type_label,
+            "year": r.year,
+            "amount_msek": r.amount_msek,
+        }
+        for r in rows
+    ]
 
 
 @mcp.tool()
-async def get_laffer_data(from_year: int = 1950, to_year: int = 2025) -> dict[str, Any]:
-    """Get Laffer curve data: total tax pressure vs GDP over time. Source: SCB."""
+async def get_laffer_data(
+    from_year: int = 1950, to_year: int = 2025,
+) -> dict[str, Any]:
+    """Get tax quota data: total tax pressure vs GDP over time.
+
+    Source: SCB.
+    """
     scb = _require_scb()
-    points = await build_laffer_curve(scb, from_year=from_year, to_year=to_year)
+    points = await build_laffer_curve(
+        scb, from_year=from_year, to_year=to_year,
+    )
     return laffer_to_chart_data(points)
 
 
 @mcp.tool()
-async def get_laffer_timeseries(from_year: int = 1950, to_year: int = 2025) -> list[dict[str, Any]]:
+async def get_laffer_timeseries(
+    from_year: int = 1950, to_year: int = 2025,
+) -> list[dict[str, Any]]:
     """Get tax quota timeseries with reform annotations. Source: SCB."""
     scb = _require_scb()
-    points = await build_laffer_curve(scb, from_year=from_year, to_year=to_year)
+    points = await build_laffer_curve(
+        scb, from_year=from_year, to_year=to_year,
+    )
     return laffer_timeseries(points)
 
 
@@ -365,7 +447,14 @@ async def get_sync_status() -> dict[str, Any]:
         "next_expected_update": status.next_expected_update,
         "cache": cache.get_stats(),
         "sources": [
-            {"source": s.source, "description": s.description, "publication_cadence": s.publication_cadence, "last_synced_at": s.last_synced_at, "source_last_updated": s.source_last_updated, "years_covered": s.years_covered}
+            {
+                "source": s.source,
+                "description": s.description,
+                "publication_cadence": s.publication_cadence,
+                "last_synced_at": s.last_synced_at,
+                "source_last_updated": s.source_last_updated,
+                "years_covered": s.years_covered,
+            }
             for s in status.sources
         ],
     }
@@ -396,7 +485,10 @@ async def get_cache_stats() -> dict[str, Any]:
 async def budget_areas() -> str:
     """All 27 Swedish expenditure areas (id, name)."""
     return json.dumps(
-        [{"area_id": aid, "area_name": name} for aid, name in EXPENDITURE_AREAS],
+        [
+            {"area_id": aid, "area_name": name}
+            for aid, name in EXPENDITURE_AREAS
+        ],
         ensure_ascii=False,
         indent=2,
     )
