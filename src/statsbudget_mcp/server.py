@@ -41,14 +41,12 @@ _scb: SCBClient | None = None
 _sk: StatskontoretClient | None = None
 _cache: BudgetCache | None = None
 
-# Exceptions that can occur during sync (network + disk)
 _SYNC_ERRORS = (
     httpx.HTTPError,
     httpx.TimeoutException,
     OSError,
 )
 
-# Exceptions that can occur during cache load (data shape + db)
 _CACHE_LOAD_ERRORS = (
     KeyError,
     TypeError,
@@ -70,7 +68,6 @@ async def lifespan(server: FastMCP):
     _sk = StatskontoretClient()
     _cache = BudgetCache()
 
-    # Load from cache if fresh, otherwise sync
     if _cache.is_populated() and not _cache.needs_refresh():
         try:
             _load_from_cache(_sk, _cache)
@@ -97,7 +94,6 @@ async def lifespan(server: FastMCP):
                 f"Sync failed ({type(exc).__name__}): {exc}",
                 file=sys.stderr,
             )
-            # Try stale cache as fallback
             if _cache.is_populated():
                 try:
                     _load_from_cache(_sk, _cache)
@@ -134,11 +130,12 @@ def _load_from_cache(sk: StatskontoretClient, cache: BudgetCache) -> None:
 
 
 async def _sync_and_cache(sk: StatskontoretClient, cache: BudgetCache) -> None:
-    """Sync from Statskontoret and persist to cache."""
+    """Sync from Statskontoret and persist to cache atomically."""
     await sk.sync()
-    cache.store_expenditure(_rows_to_dicts(sk.expenditure_data))
-    cache.store_income(_rows_to_dicts(sk.income_data))
-    cache.set_meta("last_sync_utc", datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    cache.store_snapshot(
+        expenditure=_rows_to_dicts(sk.expenditure_data),
+        income=_rows_to_dicts(sk.income_data),
+    )
 
 
 mcp = FastMCP(
@@ -201,21 +198,9 @@ EXPENDITURE_AREAS = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Budget tools (Statskontoret)
-# ---------------------------------------------------------------------------
-
-
 @mcp.tool()
 async def get_budget_overview(year: int) -> dict[str, Any]:
-    """Get the Swedish national budget overview for a given year.
-
-    Returns total expenditure, total income, balance, and all 27
-    expenditure areas with budget vs outcome amounts in MSEK.
-
-    Args:
-        year: Budget year (2006-2025 available).
-    """
+    """Get the Swedish national budget overview for a given year.\n\n    Returns total expenditure, total income, balance, and all 27\n    expenditure areas with budget vs outcome amounts in MSEK.\n\n    Args:\n        year: Budget year (2006-2025 available).\n    """
     sk = _require_sk()
     overview = sk.get_budget_overview(year)
     return {
@@ -224,13 +209,7 @@ async def get_budget_overview(year: int) -> dict[str, Any]:
         "total_income_msek": overview.total_income_msek,
         "balance_msek": overview.balance_msek,
         "areas": [
-            {
-                "area_id": a.area_id,
-                "area_name": a.area_name,
-                "budget_msek": a.budget_msek,
-                "outcome_msek": a.outcome_msek,
-                "delta_msek": a.delta_msek,
-            }
+            {"area_id": a.area_id, "area_name": a.area_name, "budget_msek": a.budget_msek, "outcome_msek": a.outcome_msek, "delta_msek": a.delta_msek}
             for a in overview.areas
         ],
     }
@@ -238,192 +217,84 @@ async def get_budget_overview(year: int) -> dict[str, Any]:
 
 @mcp.tool()
 async def get_expenditure_area(area_id: str, year: int) -> list[dict[str, Any]]:
-    """Drill down into a specific expenditure area.
-
-    Returns all appropriations within the area with budget, outcome,
-    and balance amounts in MSEK.
-
-    Args:
-        area_id: Two-digit area ID (e.g. "01" for Rikets styrelse, "06" for Defence).
-        year: Budget year.
-    """
+    """Drill down into a specific expenditure area."""
     sk = _require_sk()
     rows = sk.get_expenditure_area(area_id, year)
     return [
-        {
-            "appropriation_id": r.appropriation_id,
-            "appropriation_name": r.appropriation_name,
-            "budget_msek": r.budget_msek,
-            "amendment_budgets_msek": r.amendment_budgets_msek,
-            "outcome_msek": r.outcome_msek,
-            "opening_balance_msek": r.opening_balance_msek,
-            "closing_balance_msek": r.closing_balance_msek,
-        }
+        {"appropriation_id": r.appropriation_id, "appropriation_name": r.appropriation_name, "budget_msek": r.budget_msek, "amendment_budgets_msek": r.amendment_budgets_msek, "outcome_msek": r.outcome_msek, "opening_balance_msek": r.opening_balance_msek, "closing_balance_msek": r.closing_balance_msek}
         for r in rows
     ]
 
 
 @mcp.tool()
 async def compare_budgets(year_a: int, year_b: int) -> list[dict[str, Any]]:
-    """Compare budget outcomes between two years.
-
-    Returns per-area comparison with absolute delta (MSEK) and
-    percentage change.
-
-    Args:
-        year_a: First year (baseline).
-        year_b: Second year (comparison).
-    """
+    """Compare budget outcomes between two years."""
     sk = _require_sk()
     return sk.compare_budgets(year_a, year_b)
 
 
 @mcp.tool()
 async def sync_budget_data(year: int | None = None) -> dict[str, Any]:
-    """Download and parse latest budget data from Statskontoret.
-
-    Also persists the data to the local SQLite cache so subsequent
-    server startups are instant.
-
-    Args:
-        year: Specific year to sync (default: latest available).
-    """
+    """Download and parse latest budget data from Statskontoret.\n\n    Persists data atomically to SQLite cache via store_snapshot.\n    """
     sk = _require_sk()
     cache = _require_cache()
     status = await sk.sync(year=year)
 
-    # Persist to cache
-    cache.store_expenditure(_rows_to_dicts(sk.expenditure_data))
-    cache.store_income(_rows_to_dicts(sk.income_data))
-    cache.set_meta("last_sync_utc", datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    result = cache.store_snapshot(
+        expenditure=_rows_to_dicts(sk.expenditure_data),
+        income=_rows_to_dicts(sk.income_data),
+    )
 
     return {
         "last_sync": status.last_sync,
         "next_expected_update": status.next_expected_update,
         "cache_stats": cache.get_stats(),
+        "snapshot": result,
         "sources": [
-            {
-                "source": s.source,
-                "last_synced_at": s.last_synced_at,
-                "source_last_updated": s.source_last_updated,
-                "files_downloaded": s.files_downloaded,
-                "years_covered": s.years_covered,
-            }
+            {"source": s.source, "last_synced_at": s.last_synced_at, "source_last_updated": s.source_last_updated, "files_downloaded": s.files_downloaded, "years_covered": s.years_covered}
             for s in status.sources
         ],
     }
 
 
-# ---------------------------------------------------------------------------
-# Revenue tools (SCB)
-# ---------------------------------------------------------------------------
-
-
 @mcp.tool()
 async def get_revenue(year: int) -> dict[str, Any]:
-    """Get tax revenue breakdown for a specific year.
-
-    Returns total revenue and breakdown by category (labour, capital,
-    consumption, other) in MSEK.
-
-    Args:
-        year: Tax year (2000-2024 available).
-    """
+    """Get tax revenue breakdown for a specific year."""
     scb = _require_scb()
     rows = await scb.get_tax_revenue_summary(years=[year])
     result: dict[str, float | None] = {}
-    label_map = {
-        "101": "labour",
-        "140": "capital",
-        "160": "consumption",
-        "180": "other",
-        "190": "total",
-    }
     for row in rows:
-        key = label_map.get(row.tax_type_code, row.tax_type_code)
+        key = {"101": "labour", "140": "capital", "160": "consumption", "180": "other", "190": "total"}.get(row.tax_type_code, row.tax_type_code)
         result[key] = row.amount_msek
-
     return {"year": year, "revenue_msek": result}
 
 
 @mcp.tool()
-async def get_revenue_timeseries(
-    from_year: int = 2000, to_year: int = 2024
-) -> list[dict[str, Any]]:
-    """Get tax revenue timeseries grouped by category.
-
-    Returns yearly data with labour, capital, consumption, other,
-    and total amounts in MSEK.
-
-    Args:
-        from_year: Start year (default 2000).
-        to_year: End year (default 2024).
-    """
+async def get_revenue_timeseries(from_year: int = 2000, to_year: int = 2024) -> list[dict[str, Any]]:
+    """Get tax revenue timeseries grouped by category."""
     scb = _require_scb()
     return await scb.get_revenue_timeseries(from_year=from_year, to_year=to_year)
 
 
 @mcp.tool()
-async def get_revenue_detail(
-    year: int, tax_types: list[str] | None = None
-) -> list[dict[str, Any]]:
-    """Get detailed tax revenue for specific tax types.
-
-    Returns full breakdown with all 40 SCB tax categories.
-
-    Args:
-        year: Tax year.
-        tax_types: Optional list of SCB tax type codes to filter.
-    """
+async def get_revenue_detail(year: int, tax_types: list[str] | None = None) -> list[dict[str, Any]]:
+    """Get detailed tax revenue for specific tax types."""
     scb = _require_scb()
     rows = await scb.get_tax_revenue(years=[year], tax_types=tax_types)
-    return [
-        {
-            "tax_type_code": r.tax_type_code,
-            "tax_type_label": r.tax_type_label,
-            "year": r.year,
-            "amount_msek": r.amount_msek,
-        }
-        for r in rows
-    ]
-
-
-# ---------------------------------------------------------------------------
-# Laffer curve tools
-# ---------------------------------------------------------------------------
+    return [{"tax_type_code": r.tax_type_code, "tax_type_label": r.tax_type_label, "year": r.year, "amount_msek": r.amount_msek} for r in rows]
 
 
 @mcp.tool()
-async def get_laffer_data(
-    from_year: int = 1950, to_year: int = 2025
-) -> dict[str, Any]:
-    """Get Laffer curve data: total tax pressure vs GDP over time.
-
-    Returns scatter plot data grouped by decade with annotated reform
-    years (1976 Pomperipossa, 1991 century reform, 2020 varnskatt removed).
-
-    Args:
-        from_year: Start year (default 1950).
-        to_year: End year (default 2025).
-    """
+async def get_laffer_data(from_year: int = 1950, to_year: int = 2025) -> dict[str, Any]:
+    """Get Laffer curve data: total tax pressure vs GDP over time."""
     scb = _require_scb()
     points = await build_laffer_curve(scb, from_year=from_year, to_year=to_year)
     return laffer_to_chart_data(points)
 
 
 @mcp.tool()
-async def get_laffer_timeseries(
-    from_year: int = 1950, to_year: int = 2025
-) -> list[dict[str, Any]]:
-    """Get tax quota timeseries with reform annotations.
-
-    Returns yearly tax quota (% of GDP) with markers at major reforms.
-    Suitable for line chart visualization.
-
-    Args:
-        from_year: Start year (default 1950).
-        to_year: End year (default 2025).
-    """
+async def get_laffer_timeseries(from_year: int = 1950, to_year: int = 2025) -> list[dict[str, Any]]:
+    """Get tax quota timeseries with reform annotations."""
     scb = _require_scb()
     points = await build_laffer_curve(scb, from_year=from_year, to_year=to_year)
     return laffer_timeseries(points)
@@ -431,26 +302,13 @@ async def get_laffer_timeseries(
 
 @mcp.tool()
 async def get_tax_reforms() -> list[dict[str, Any]]:
-    """Get list of major Swedish tax reforms with descriptions.
-
-    Returns reform year, label, and description for annotating
-    visualizations.
-    """
+    """Get list of major Swedish tax reforms with descriptions."""
     return TAX_REFORMS
-
-
-# ---------------------------------------------------------------------------
-# Meta tools
-# ---------------------------------------------------------------------------
 
 
 @mcp.tool()
 async def get_sync_status() -> dict[str, Any]:
-    """Get data freshness information.
-
-    Returns when budget data was last synced, when the source was
-    last updated, and when to expect the next publication.
-    """
+    """Get data freshness information."""
     sk = _require_sk()
     cache = _require_cache()
     status = sk.get_sync_status()
@@ -459,14 +317,7 @@ async def get_sync_status() -> dict[str, Any]:
         "next_expected_update": status.next_expected_update,
         "cache": cache.get_stats(),
         "sources": [
-            {
-                "source": s.source,
-                "description": s.description,
-                "publication_cadence": s.publication_cadence,
-                "last_synced_at": s.last_synced_at,
-                "source_last_updated": s.source_last_updated,
-                "years_covered": s.years_covered,
-            }
+            {"source": s.source, "description": s.description, "publication_cadence": s.publication_cadence, "last_synced_at": s.last_synced_at, "source_last_updated": s.source_last_updated, "years_covered": s.years_covered}
             for s in status.sources
         ],
     }
@@ -474,40 +325,23 @@ async def get_sync_status() -> dict[str, Any]:
 
 @mcp.tool()
 async def get_publication_schedule() -> dict[str, Any]:
-    """Get the Statskontoret data publication schedule.
-
-    Shows when new budget data is typically published (March and June)
-    and what each release contains.
-    """
+    """Get the Statskontoret data publication schedule."""
     sk = _require_sk()
     return sk.get_publication_schedule()
 
 
 @mcp.tool()
 async def get_available_years() -> dict[str, Any]:
-    """Get list of years with loaded budget data.
-
-    Returns years for which expenditure and income data is available.
-    Call sync_budget_data first if this returns empty.
-    """
+    """Get list of years with loaded budget data."""
     sk = _require_sk()
     return {"years": sk.get_available_years()}
 
 
 @mcp.tool()
 async def get_cache_stats() -> dict[str, Any]:
-    """Get SQLite cache diagnostics.
-
-    Returns row counts, years covered, cache age, and whether
-    a refresh is recommended.
-    """
+    """Get SQLite cache diagnostics."""
     cache = _require_cache()
     return cache.get_stats()
-
-
-# ---------------------------------------------------------------------------
-# MCP Resources
-# ---------------------------------------------------------------------------
 
 
 @mcp.resource("budget://areas")
@@ -520,13 +354,8 @@ async def budget_areas() -> str:
     )
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-
 def main():
-    """Run the MCP server (called by `statsbudget-mcp` console script)."""
+    """Run the MCP server."""
     mcp.run()
 
 
