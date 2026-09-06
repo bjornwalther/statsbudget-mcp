@@ -34,6 +34,7 @@ from .statskontoret import (
     ExpenditureRow,
     IncomeRow,
     StatskontoretClient,
+    SyncError,
 )
 
 _scb: SCBClient | None = None
@@ -44,6 +45,8 @@ _SYNC_ERRORS = (
     httpx.HTTPError,
     httpx.TimeoutException,
     OSError,
+    SyncError,
+    ValueError,
 )
 
 _CACHE_LOAD_ERRORS = (
@@ -143,7 +146,11 @@ def _load_from_cache(sk: StatskontoretClient, cache: BudgetCache) -> None:
 async def _sync_and_cache(
     sk: StatskontoretClient, cache: BudgetCache,
 ) -> None:
-    """Sync from Statskontoret and persist to cache atomically."""
+    """Sync from Statskontoret and persist to cache atomically.
+
+    sync() guarantees both datasets are present or raises SyncError.
+    We only reach store_snapshot when the sync was complete.
+    """
     await sk.sync()
     cache.store_snapshot(
         expenditure=_rows_to_dicts(sk.expenditure_data),
@@ -155,7 +162,7 @@ mcp = FastMCP(
     "statsbudget-mcp",
     instructions=(
         "Swedish national budget data: expenditure outturn by area, "
-        "tax revenue from SCB, and Laffer curve analysis. "
+        "tax revenue from SCB, and tax quota analysis. "
         "Budget data shows actual outturn (utfall) from Statskontoret, "
         "not the originally proposed budget. "
         "Data from SCB and Statskontoret."
@@ -323,6 +330,7 @@ async def sync_budget_data(
     """Download and parse latest budget outturn from Statskontoret.
 
     Persists data atomically to SQLite cache via store_snapshot.
+    Raises SyncError if either dataset is missing.
     """
     sk = _require_sk()
     cache = _require_cache()
