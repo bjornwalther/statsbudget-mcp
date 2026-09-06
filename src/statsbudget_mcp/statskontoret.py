@@ -26,19 +26,23 @@ In practice, syncing once in March and once in June covers all updates.
 from __future__ import annotations
 
 import csv
+import html as html_mod
 import io
 import json
 import re
+import sys
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 
 BASE_URL = "https://www.statskontoret.se"
 ARSUTFALL_PAGE = "/analys-och-statistik/oppna-data/arsutfall/"
+ALLOWED_HOSTS = {"www.statskontoret.se", "statskontoret.se"}
 
 HREF_RE = re.compile(r'<a\b[^>]*href=["\']([^"\']+)["\'][^>]*>([\s\S]*?)</a>', re.IGNORECASE)
 TAG_RE = re.compile(r"<[^>]+>")
@@ -120,7 +124,6 @@ class AreaSummary:
     delta_msek: float
 
 
-# Publication schedule constants for UI
 PUBLICATION_SCHEDULE = {
     "expenditure_definitive": {
         "description": "Definitiva utgifter f\u00f6r f\u00f6reg\u00e5ende \u00e5r",
@@ -172,21 +175,68 @@ def _parse_int_safe(value: str) -> int:
 
 
 def _now_iso() -> str:
-    """Current UTC time as ISO string."""
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _next_expected_update() -> str:
-    """Estimate next Statskontoret data release."""
     now = datetime.now(timezone.utc)
     year = now.year
-    # March and June are the update months
     if now.month < 3:
         return f"{year}-03-15"
     elif now.month < 6:
         return f"{year}-06-15"
     else:
         return f"{year + 1}-03-15"
+
+
+def _classify_link(href: str, anchor_text: str) -> str:
+    """Classify a download link as expenditure, income, or unknown.
+
+    Primary: parse documentType from the URL query string.
+    Fallback: check anchor text for keywords.
+    """
+    parsed = urlparse(href)
+    params = parse_qs(parsed.query)
+
+    doc_type = (params.get("documentType") or params.get("DocumentType") or [""])[0].lower()
+    if "utgift" in doc_type:
+        return "expenditure"
+    if "inkomst" in doc_type:
+        return "income"
+
+    text = anchor_text.lower()
+    if "utgift" in text or "expenditure" in text:
+        return "expenditure"
+    if "inkomst" in text or "income" in text:
+        return "income"
+
+    return "unknown"
+
+
+def _classify_format(href: str, anchor_text: str) -> str:
+    """Determine file format from URL or anchor text."""
+    parsed = urlparse(href)
+    params = parse_qs(parsed.query)
+    file_type = (params.get("fileType") or params.get("FileType") or [""])[0].lower()
+
+    if file_type == "zip" or "csv" in anchor_text.lower():
+        return "zip"
+    if file_type == "excel" or "excel" in anchor_text.lower():
+        return "xlsx"
+    if href.lower().endswith(".zip"):
+        return "zip"
+    if href.lower().endswith(".xlsx"):
+        return "xlsx"
+    return "unknown"
+
+
+def _is_allowed_host(url: str) -> bool:
+    """Check that URL points to an allowed Statskontoret host."""
+    try:
+        parsed = urlparse(url)
+        return parsed.hostname in ALLOWED_HOSTS
+    except (ValueError, AttributeError):
+        return False
 
 
 class StatskontoretClient:
@@ -209,7 +259,10 @@ class StatskontoretClient:
         timeout: float = 60.0,
     ) -> None:
         self._client = httpx.AsyncClient(timeout=timeout, follow_redirects=True)
-        self._data_dir = Path(data_dir) if data_dir else Path.cwd() / ".statsbudget-cache"
+        if data_dir is not None:
+            self._data_dir = Path(data_dir)
+        else:
+            self._data_dir = Path.home() / ".statsbudget-cache"
         self._data_dir.mkdir(parents=True, exist_ok=True)
         self._expenditure_data: list[ExpenditureRow] = []
         self._income_data: list[IncomeRow] = []
@@ -218,7 +271,6 @@ class StatskontoretClient:
         self._load_meta()
 
     def _load_meta(self) -> None:
-        """Load sync metadata from disk if available."""
         if self._meta_path.exists():
             try:
                 raw = json.loads(self._meta_path.read_text(encoding="utf-8"))
@@ -233,7 +285,6 @@ class StatskontoretClient:
                 pass
 
     def _save_meta(self) -> None:
-        """Persist sync metadata to disk."""
         data = {
             "last_sync": self._sync_meta.last_sync,
             "next_expected_update": self._sync_meta.next_expected_update,
@@ -250,7 +301,9 @@ class StatskontoretClient:
                 for s in self._sync_meta.sources
             ],
         }
-        self._meta_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        self._meta_path.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -266,10 +319,12 @@ class StatskontoretClient:
     ) -> tuple[list[dict[str, str]], list[str]]:
         """Scrape the arsutfall page for download links.
 
+        Handles HTML-encoded URLs (& -> &) and classifies links
+        by documentType query parameter rather than anchor text alone.
+        Only accepts URLs from allowed Statskontoret hosts.
+
         Returns:
-            Tuple of (links, source_update_dates) where links is a list of
-            dicts with 'url', 'text', and 'type' (expenditure/income), and
-            source_update_dates is a list of dates found on the page.
+            Tuple of (links, source_update_dates).
         """
         url = f"{BASE_URL}{ARSUTFALL_PAGE}"
         if year:
@@ -277,33 +332,55 @@ class StatskontoretClient:
 
         resp = await self._client.get(url)
         resp.raise_for_status()
-        html = resp.text
+        raw_html = resp.text
 
-        # Extract "Senast uppdaterad" dates from the page
-        source_dates = UPDATED_RE.findall(html)
+        source_dates = UPDATED_RE.findall(raw_html)
 
         links: list[dict[str, str]] = []
-        for match in HREF_RE.finditer(html):
-            href = match.group(1).strip()
-            text = TAG_RE.sub("", match.group(2)).strip().lower()
+        seen_urls: set[str] = set()
+
+        for match in HREF_RE.finditer(raw_html):
+            raw_href = html_mod.unescape(match.group(1).strip())
+            anchor_text = TAG_RE.sub("", match.group(2)).strip()
 
             is_data_file = (
-                "getfile" in href.lower()
-                or href.endswith(".zip")
-                or href.endswith(".xlsx")
-                or "filetype=" in href.lower()
+                "getfile" in raw_href.lower()
+                or raw_href.lower().endswith(".zip")
+                or raw_href.lower().endswith(".xlsx")
+                or "filetype=" in raw_href.lower()
             )
             if not is_data_file:
                 continue
 
-            file_type = "unknown"
-            if "utgift" in text or "expenditure" in text:
-                file_type = "expenditure"
-            elif "inkomst" in text or "income" in text:
-                file_type = "income"
+            resolved = raw_href if raw_href.startswith("http") else f"{BASE_URL}{raw_href}"
 
-            resolved = href if href.startswith("http") else f"{BASE_URL}{href}"
-            links.append({"url": resolved, "text": text, "type": file_type})
+            if not _is_allowed_host(resolved):
+                print(
+                    f"Skipping download URL from disallowed host: {resolved}",
+                    file=sys.stderr,
+                )
+                continue
+
+            if resolved in seen_urls:
+                continue
+            seen_urls.add(resolved)
+
+            file_type = _classify_link(resolved, anchor_text)
+            file_format = _classify_format(resolved, anchor_text)
+
+            if file_type == "unknown":
+                continue
+            if file_format == "unknown":
+                continue
+            if file_format == "xlsx":
+                continue
+
+            links.append({
+                "url": resolved,
+                "text": anchor_text,
+                "type": file_type,
+                "format": file_format,
+            })
 
         return links, source_dates
 
@@ -318,31 +395,47 @@ class StatskontoretClient:
     async def sync(self, year: int | None = None) -> SyncStatus:
         """Download and parse latest data from Statskontoret.
 
-        If year is specified, only sync that year's data.
-        Returns SyncStatus with metadata about what was fetched.
+        Replaces (not appends) existing data to prevent double-counting.
+        Picks the latest available revision per document type.
         """
         links, source_dates = await self.discover_download_links(year=year)
         sync_time = _now_iso()
         latest_source_date = max(source_dates) if source_dates else None
         files_downloaded: list[str] = []
 
+        new_expenditure: list[ExpenditureRow] = []
+        new_income: list[IncomeRow] = []
+
+        exp_seen = False
+        inc_seen = False
+
         for link in links:
             url = link["url"]
             file_type = link["type"]
-            suffix = "zip" if "zip" in url.lower() or "filetype=zip" in url.lower() else "xlsx"
-            filename = f"{file_type}_{year or 'latest'}.{suffix}"
+
+            if file_type == "expenditure" and exp_seen:
+                continue
+            if file_type == "income" and inc_seen:
+                continue
+
+            filename = f"{file_type}_{year or 'latest'}.zip"
 
             path = await self.download_file(url, filename)
             files_downloaded.append(filename)
 
-            if suffix == "zip":
-                csv_content = self._extract_csv_from_zip(path)
-                if csv_content and file_type == "expenditure":
-                    self._expenditure_data.extend(self._parse_expenditure_csv(csv_content))
-                elif csv_content and file_type == "income":
-                    self._income_data.extend(self._parse_income_csv(csv_content))
+            csv_content = self._extract_csv_from_zip(path)
+            if csv_content and file_type == "expenditure":
+                new_expenditure = self._parse_expenditure_csv(csv_content)
+                exp_seen = True
+            elif csv_content and file_type == "income":
+                new_income = self._parse_income_csv(csv_content)
+                inc_seen = True
 
-        # Update sync metadata
+        if new_expenditure:
+            self._expenditure_data = new_expenditure
+        if new_income:
+            self._income_data = new_income
+
         source_meta = DataSourceMeta(
             source="Statskontoret \u00d6ppna Data - \u00c5rsutfall",
             description="Annual budget outcome: expenditure and income for central government",
@@ -363,19 +456,9 @@ class StatskontoretClient:
         return self._sync_meta
 
     def get_sync_status(self) -> SyncStatus:
-        """Get current sync status and data freshness info.
-
-        Useful for UI display: shows when data was last fetched,
-        when the source was last updated, and when to expect new data.
-        """
         return self._sync_meta
 
     def get_publication_schedule(self) -> dict[str, Any]:
-        """Get the publication schedule for Statskontoret budget data.
-
-        Returns a dict describing when new data is typically published,
-        useful for displaying freshness indicators in a UI.
-        """
         return {
             "schedule": PUBLICATION_SCHEDULE,
             "summary": (
@@ -392,7 +475,6 @@ class StatskontoretClient:
         expenditure_path: str | Path | None = None,
         income_path: str | Path | None = None,
     ) -> None:
-        """Load data from local CSV files (already extracted from ZIP)."""
         if expenditure_path:
             content = Path(expenditure_path).read_text(encoding="utf-8")
             self._expenditure_data = self._parse_expenditure_csv(content)
@@ -401,7 +483,6 @@ class StatskontoretClient:
             self._income_data = self._parse_income_csv(content)
 
     def _extract_csv_from_zip(self, zip_path: Path) -> str | None:
-        """Extract first CSV file from a ZIP archive."""
         try:
             with zipfile.ZipFile(zip_path, "r") as zf:
                 csv_files = [n for n in zf.namelist() if n.lower().endswith(".csv")]
@@ -413,20 +494,15 @@ class StatskontoretClient:
             return None
 
     def _parse_expenditure_csv(self, content: str) -> list[ExpenditureRow]:
-        """Parse expenditure CSV content into ExpenditureRow objects."""
         rows: list[ExpenditureRow] = []
         reader = csv.DictReader(io.StringIO(content), delimiter=";")
-
         if not reader.fieldnames:
             return rows
-
         col_map = self._map_expenditure_columns(reader.fieldnames)
-
         for record in reader:
             area_id = record.get(col_map["area_id"], "").strip()
             if not area_id or not area_id[0].isdigit():
                 continue
-
             rows.append(
                 ExpenditureRow(
                     expenditure_area_id=area_id,
@@ -450,20 +526,15 @@ class StatskontoretClient:
         return rows
 
     def _parse_income_csv(self, content: str) -> list[IncomeRow]:
-        """Parse income CSV content into IncomeRow objects."""
         rows: list[IncomeRow] = []
         reader = csv.DictReader(io.StringIO(content), delimiter=";")
-
         if not reader.fieldnames:
             return rows
-
         col_map = self._map_income_columns(reader.fieldnames)
-
         for record in reader:
             income_type = record.get(col_map["income_type"], "").strip()
             if not income_type or not income_type[0].isdigit():
                 continue
-
             rows.append(
                 IncomeRow(
                     income_type=income_type,
@@ -483,7 +554,6 @@ class StatskontoretClient:
 
     @staticmethod
     def _map_expenditure_columns(fieldnames: list[str]) -> dict[str, str]:
-        """Map known column name variants to canonical keys."""
         mapping: dict[str, str] = {}
         for name in fieldnames:
             lower = name.lower().strip()
@@ -513,7 +583,6 @@ class StatskontoretClient:
                 mapping.setdefault("opening", name)
             elif "utg\u00e5ende" in lower or "utgaende" in lower:
                 mapping.setdefault("closing", name)
-
         defaults = {
             "area_id": "Utgiftsomr\u00e5de",
             "area_name": "Utgiftsomr\u00e5desnamn",
@@ -532,7 +601,6 @@ class StatskontoretClient:
 
     @staticmethod
     def _map_income_columns(fieldnames: list[str]) -> dict[str, str]:
-        """Map income CSV column name variants to canonical keys."""
         mapping: dict[str, str] = {}
         for name in fieldnames:
             lower = name.lower().strip()
@@ -563,7 +631,6 @@ class StatskontoretClient:
                 mapping.setdefault("budget", name)
             elif lower == "utfall":
                 mapping.setdefault("outcome", name)
-
         defaults = {
             "income_type": "Inkomsttyp",
             "income_type_name": "Inkomsttypsnamn",
@@ -580,61 +647,42 @@ class StatskontoretClient:
         return mapping
 
     def get_budget_overview(self, year: int) -> BudgetOverview:
-        """Get aggregated budget overview for a specific year."""
         year_exp = [r for r in self._expenditure_data if r.year == year]
         year_inc = [r for r in self._income_data if r.year == year]
-
         area_map: dict[str, AreaSummary] = {}
         for row in year_exp:
             aid = row.expenditure_area_id
             if aid not in area_map:
                 area_map[aid] = AreaSummary(
-                    area_id=aid,
-                    area_name=row.expenditure_area_name,
-                    budget_msek=0.0,
-                    outcome_msek=0.0,
-                    delta_msek=0.0,
+                    area_id=aid, area_name=row.expenditure_area_name,
+                    budget_msek=0.0, outcome_msek=0.0, delta_msek=0.0,
                 )
             if row.budget_msek is not None:
                 area_map[aid].budget_msek += row.budget_msek
             if row.outcome_msek is not None:
                 area_map[aid].outcome_msek += row.outcome_msek
-
         for area in area_map.values():
             area.delta_msek = area.outcome_msek - area.budget_msek
-
         total_exp = sum(a.outcome_msek for a in area_map.values())
         total_inc = sum(r.outcome_msek or 0.0 for r in year_inc)
-
         return BudgetOverview(
-            year=year,
-            total_expenditure_msek=total_exp,
-            total_income_msek=total_inc,
-            balance_msek=total_inc - total_exp,
+            year=year, total_expenditure_msek=total_exp,
+            total_income_msek=total_inc, balance_msek=total_inc - total_exp,
             areas=sorted(area_map.values(), key=lambda a: a.area_id),
         )
 
     def get_expenditure_area(self, area_id: str, year: int) -> list[ExpenditureRow]:
-        """Get all appropriations for a specific expenditure area and year."""
         return [
-            r
-            for r in self._expenditure_data
+            r for r in self._expenditure_data
             if r.expenditure_area_id == area_id and r.year == year
         ]
 
     def compare_budgets(self, year_a: int, year_b: int) -> list[dict[str, Any]]:
-        """Compare budget outcomes between two years.
-
-        Returns per-area comparison with absolute and percentage deltas.
-        """
         overview_a = self.get_budget_overview(year_a)
         overview_b = self.get_budget_overview(year_b)
-
         areas_a = {a.area_id: a for a in overview_a.areas}
         areas_b = {a.area_id: a for a in overview_b.areas}
-
         all_ids = sorted(set(areas_a.keys()) | set(areas_b.keys()))
-
         comparisons: list[dict[str, Any]] = []
         for aid in all_ids:
             a = areas_a.get(aid)
@@ -643,7 +691,6 @@ class StatskontoretClient:
             outcome_b = b.outcome_msek if b else 0.0
             delta = outcome_b - outcome_a
             pct = (delta / outcome_a * 100) if outcome_a != 0 else None
-
             comparisons.append({
                 "area_id": aid,
                 "area_name": (b or a).area_name if (b or a) else aid,
@@ -652,11 +699,9 @@ class StatskontoretClient:
                 "delta_msek": delta,
                 "delta_pct": round(pct, 2) if pct is not None else None,
             })
-
         return comparisons
 
     def get_available_years(self) -> list[int]:
-        """Get list of years with loaded data."""
         years = set()
         for row in self._expenditure_data:
             years.add(row.year)
@@ -666,10 +711,8 @@ class StatskontoretClient:
 
     @property
     def expenditure_data(self) -> list[ExpenditureRow]:
-        """Access raw expenditure data."""
         return self._expenditure_data
 
     @property
     def income_data(self) -> list[IncomeRow]:
-        """Access raw income data."""
         return self._income_data
