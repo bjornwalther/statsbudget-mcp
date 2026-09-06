@@ -11,6 +11,13 @@ Built for Claude Desktop, Glama, and any MCP-compatible client.
 
 Budget tools return **actual outturn** (utfall) from Statskontoret, not the originally proposed budget. This means the numbers show what was actually spent and collected, not what was planned. Every response includes `data_type` and `source` fields so consuming applications can communicate this clearly.
 
+## Sync Guarantees
+
+- **Atomic snapshots**: both expenditure and income must parse successfully before any in-memory data or cache is updated. If either dataset fails, the server raises `SyncError` and falls back to the previous valid cache.
+- **Income revision selection**: when multiple income revisions are available (Preliminar 1, 2, 3, Definitiv), the sync picks the highest-priority revision (definitiv > preliminar 3 > 2 > 1), not the first one in DOM order. The selected revision is exposed in sync metadata.
+- **Streaming downloads**: files are downloaded with a streaming byte counter and `Content-Length` early check. The full response is never buffered before enforcing the 50 MB limit.
+- **Startup fallback**: if sync fails at startup, the server falls back to a stale but complete cache. If no cache exists, it starts empty and logs the error.
+
 ## Data Sources
 
 | Source | What | Format | Coverage |
@@ -37,7 +44,7 @@ Budget tools return **actual outturn** (utfall) from Statskontoret, not the orig
 - `get_tax_reforms()` : annotated Swedish tax reforms (1971-2020)
 
 **Meta (4)**
-- `get_sync_status()` : data freshness and cache diagnostics
+- `get_sync_status()` : data freshness, selected income revision, and cache diagnostics
 - `get_publication_schedule()` : when Statskontoret publishes new data
 - `get_available_years()` : years with loaded outturn data
 - `get_cache_stats()` : SQLite cache diagnostics
@@ -92,9 +99,9 @@ src/statsbudget_mcp/
 |-- __init__.py        # Package version
 |-- server.py          # FastMCP server, 14 tools, lifespan with auto-cache
 |-- scb_client.py      # SCB PxWeb API client (async, retry with backoff)
-|-- statskontoret.py   # Statskontoret CSV client (scrape, download, parse)
+|-- statskontoret.py   # Statskontoret client (scrape, revision select, streaming download)
 |-- laffer.py          # Tax quota analysis with reform annotations
-|-- cache.py           # SQLite persistent cache (schema-versioned, atomic snapshots)
+|-- cache.py           # SQLite cache (schema-versioned, atomic snapshots, dual-dataset validation)
 |-- formatters.py      # ASCII visualization (bars, flow, decision chain, Laffer)
 ```
 
@@ -108,6 +115,9 @@ src/statsbudget_mcp/
 - [x] ASCII formatters (bars, flow, decision, comparison, Laffer timeline)
 - [x] Retry logic with exponential backoff
 - [x] Download/ZIP size limits and host allowlist
+- [x] Atomic staged sync with SyncError fallback
+- [x] Income revision selection (definitiv > preliminar)
+- [x] Streaming download with size enforcement
 - [ ] Publish to PyPI (`uvx statsbudget-mcp`)
 - [ ] Riksdagen voting client (propositions, votes per party)
 - [ ] Taxpayer breakdown by income source (5-level drill-down with legislative history)
