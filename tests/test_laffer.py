@@ -1,4 +1,4 @@
-"""Tests for Laffer curve module."""
+"""Tests for Laffer / tax quota analysis module."""
 
 import pytest
 
@@ -20,7 +20,7 @@ def _make_points() -> list[LafferPoint]:
         ),
         LafferPoint(
             year=1976, tax_quota_pct=47.8, gdp_msek=280000,
-            total_tax_msek=133840, real_gdp_growth_pct=-1.2,
+            total_tax_msek=None, real_gdp_growth_pct=-1.2,
             decade="1970s", is_reform_year=True,
             reform_label="Pomperipossa (102% marginalskatt)",
         ),
@@ -60,12 +60,26 @@ class TestLafferPoint:
 
 
 class TestChartData:
-    def test_datasets_grouped_by_decade(self):
+    def test_timeseries_key_exists(self):
+        """Chart data uses 'timeseries' (not legacy 'datasets')."""
         points = _make_points()
         chart = laffer_to_chart_data(points)
-        assert "1970s" in chart["datasets"]
-        assert "1990s" in chart["datasets"]
-        assert "2020s" in chart["datasets"]
+        assert "timeseries" in chart
+        assert "datasets" not in chart
+
+    def test_timeseries_has_decade_info(self):
+        """Each timeseries entry carries its decade tag."""
+        points = _make_points()
+        chart = laffer_to_chart_data(points)
+        decades = {e["decade"] for e in chart["timeseries"]}
+        assert "1970s" in decades
+        assert "1990s" in decades
+        assert "2020s" in decades
+
+    def test_timeseries_length(self):
+        points = _make_points()
+        chart = laffer_to_chart_data(points)
+        assert len(chart["timeseries"]) == len(points)
 
     def test_annotations_contain_reforms(self):
         points = _make_points()
@@ -91,6 +105,60 @@ class TestChartData:
         assert "y" in chart["axis_labels"]
 
 
+class TestChartDataEmpty:
+    """laffer_to_chart_data([]) must not crash."""
+
+    def test_empty_returns_dict(self):
+        result = laffer_to_chart_data([])
+        assert isinstance(result, dict)
+
+    def test_empty_timeseries_is_list(self):
+        result = laffer_to_chart_data([])
+        assert result["timeseries"] == []
+
+    def test_empty_annotations_is_list(self):
+        result = laffer_to_chart_data([])
+        assert result["annotations"] == []
+
+    def test_empty_summary_nulls(self):
+        result = laffer_to_chart_data([])
+        s = result["summary"]
+        assert s["min_quota_pct"] is None
+        assert s["max_quota_pct"] is None
+        assert s["peak_year"] is None
+        assert s["current_year"] is None
+        assert s["years_covered"] == 0
+
+    def test_empty_axis_labels(self):
+        result = laffer_to_chart_data([])
+        assert "x" in result["axis_labels"]
+        assert "y" in result["axis_labels"]
+
+
+class TestNonePreservation:
+    """total_tax_msek=None must stay None, not become 0."""
+
+    def test_none_in_chart_timeseries(self):
+        points = _make_points()
+        chart = laffer_to_chart_data(points)
+        row_1976 = [t for t in chart["timeseries"] if t["year"] == 1976]
+        assert len(row_1976) == 1
+        assert row_1976[0]["tax_msek"] is None
+
+    def test_none_in_flat_timeseries(self):
+        points = _make_points()
+        ts = laffer_timeseries(points)
+        row_1976 = [t for t in ts if t["year"] == 1976]
+        assert len(row_1976) == 1
+        assert row_1976[0]["total_tax_msek"] is None
+
+    def test_non_none_values_intact(self):
+        points = _make_points()
+        ts = laffer_timeseries(points)
+        row_1975 = [t for t in ts if t["year"] == 1975]
+        assert row_1975[0]["total_tax_msek"] == 110500
+
+
 class TestTimeseries:
     def test_output_format(self):
         points = _make_points()
@@ -99,6 +167,14 @@ class TestTimeseries:
         assert ts[0]["year"] == 1975
         assert ts[0]["tax_quota_pct"] == 44.2
         assert ts[0]["reform"] is None
+
+    def test_nominal_growth_field_name(self):
+        """Field is 'nominal_gdp_growth_pct', not 'real_gdp_growth_pct'."""
+        points = _make_points()
+        ts = laffer_timeseries(points)
+        for entry in ts:
+            assert "nominal_gdp_growth_pct" in entry
+            assert "real_gdp_growth_pct" not in entry
 
     def test_reform_annotations_in_timeseries(self):
         points = _make_points()
