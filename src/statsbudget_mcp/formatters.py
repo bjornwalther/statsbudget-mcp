@@ -79,7 +79,7 @@ def format_budget_bars(
     ]
 
     shown_total = 0.0
-    for i, area in enumerate(areas[:top_n]):
+    for _i, area in enumerate(areas[:top_n]):
         outcome = area.get("outcome_msek", 0) or 0
         shown_total += outcome
         name = area["area_name"]
@@ -116,7 +116,6 @@ def format_budget_flow(
         revenue: Output from get_revenue tool (optional, enhances left side).
         top_n: Number of expenditure areas to show.
     """
-    year = overview["year"]
     total_exp = overview["total_expenditure_msek"]
     total_inc = overview["total_income_msek"]
     balance = total_inc - total_exp
