@@ -13,6 +13,7 @@ Schema:
 
 The cache is stored in ~/.statsbudget-cache/statsbudget.db by default.
 Schema version is checked on load; mismatches are treated as cache misses.
+A cache is only considered valid when both expenditure AND income are present.
 """
 
 from __future__ import annotations
@@ -105,9 +106,12 @@ class BudgetCache:
     matches SCHEMA_VERSION exactly. Mismatches are treated as cache
     misses (data is discarded, not migrated).
 
+    A cache is only considered populated when BOTH expenditure and
+    income datasets have rows and the snapshot is marked complete.
+
     Usage:
         cache = BudgetCache()
-        cache.store_expenditure(rows)
+        cache.store_snapshot(expenditure_rows, income_rows)  # atomic
         rows = cache.load_expenditure(year=2024)
         cache.close()
     """
@@ -134,12 +138,23 @@ class BudgetCache:
         stored = self.get_meta("schema_version")
         return stored == SCHEMA_VERSION
 
+    def _snapshot_complete(self) -> bool:
+        """Check if the last snapshot wrote both datasets."""
+        return self.get_meta("snapshot_complete") == "true"
+
     def is_populated(self) -> bool:
-        """Check if cache has valid data (correct schema + rows exist)."""
+        """Check if cache has valid, complete data.
+
+        Requires: correct schema version, snapshot marked complete,
+        and both expenditure and income have rows.
+        """
         if not self._schema_valid():
             return False
-        cur = self._conn.execute("SELECT COUNT(*) FROM expenditure")
-        return cur.fetchone()[0] > 0
+        if not self._snapshot_complete():
+            return False
+        exp_count = self._conn.execute("SELECT COUNT(*) FROM expenditure").fetchone()[0]
+        inc_count = self._conn.execute("SELECT COUNT(*) FROM income").fetchone()[0]
+        return exp_count > 0 and inc_count > 0
 
     def get_meta(self, key: str) -> str | None:
         cur = self._conn.execute("SELECT value FROM meta WHERE key = ?", (key,))
@@ -169,6 +184,8 @@ class BudgetCache:
         """Check if cache is stale (default: older than 1 week)."""
         if not self._schema_valid():
             return True
+        if not self._snapshot_complete():
+            return True
         age = self.cache_age_hours()
         if age is None:
             return True
@@ -179,6 +196,76 @@ class BudgetCache:
         for table in ("expenditure", "income", "scb_revenue", "scb_quota", "meta"):
             self._conn.execute(f"DELETE FROM {table}")
         self._conn.commit()
+
+    # -- Atomic snapshot --
+
+    def store_snapshot(
+        self,
+        expenditure: list[dict[str, Any]],
+        income: list[dict[str, Any]],
+        sync_utc: str | None = None,
+    ) -> dict[str, int]:
+        """Atomically store both expenditure and income datasets.
+
+        Writes both tables + metadata in a single transaction.
+        If either dataset is empty, the snapshot is still stored
+        but snapshot_complete is set to false.
+        """
+        if sync_utc is None:
+            sync_utc = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+        self._conn.execute("DELETE FROM expenditure")
+        self._conn.execute("DELETE FROM income")
+
+        exp_count = 0
+        if expenditure:
+            self._conn.executemany(
+                "INSERT INTO expenditure VALUES (?,?,?,?,?,?,?,?,?,?)",
+                [
+                    (
+                        r["expenditure_area_id"], r["expenditure_area_name"],
+                        r["appropriation_id"], r["appropriation_name"],
+                        r["year"], r.get("budget_msek"), r.get("amendment_budgets_msek"),
+                        r.get("outcome_msek"), r.get("opening_balance_msek"),
+                        r.get("closing_balance_msek"),
+                    )
+                    for r in expenditure
+                ],
+            )
+            exp_count = len(expenditure)
+
+        inc_count = 0
+        if income:
+            self._conn.executemany(
+                "INSERT INTO income VALUES (?,?,?,?,?,?,?,?,?)",
+                [
+                    (
+                        r["income_type"], r["income_type_name"],
+                        r["income_main_group"], r["income_main_group_name"],
+                        r["income_title"], r["income_title_name"],
+                        r["year"], r.get("budget_msek"), r.get("outcome_msek"),
+                    )
+                    for r in income
+                ],
+            )
+            inc_count = len(income)
+
+        complete = exp_count > 0 and inc_count > 0
+        self._conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+            ("schema_version", SCHEMA_VERSION),
+        )
+        self._conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+            ("snapshot_complete", "true" if complete else "false"),
+        )
+        self._conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+            ("last_sync_utc", sync_utc),
+        )
+        self._conn.commit()
+
+        return {"expenditure": exp_count, "income": inc_count, "complete": complete}
 
     # -- Expenditure --
 
@@ -203,7 +290,6 @@ class BudgetCache:
         return len(rows)
 
     def load_expenditure(self, year: int | None = None) -> list[dict[str, Any]]:
-        """Load expenditure rows. Returns [] if schema version mismatches."""
         if not self._schema_valid():
             print("Cache schema mismatch, treating as empty.", file=sys.stderr)
             return []
@@ -238,7 +324,6 @@ class BudgetCache:
         return len(rows)
 
     def load_income(self, year: int | None = None) -> list[dict[str, Any]]:
-        """Load income rows. Returns [] if schema version mismatches."""
         if not self._schema_valid():
             print("Cache schema mismatch, treating as empty.", file=sys.stderr)
             return []
@@ -314,6 +399,7 @@ class BudgetCache:
             "db_path": str(self._db_path),
             "schema_version": SCHEMA_VERSION,
             "schema_valid": self._schema_valid(),
+            "snapshot_complete": self._snapshot_complete(),
             "row_counts": counts,
             "total_rows": sum(counts.values()),
             "years_covered": sorted(years),
