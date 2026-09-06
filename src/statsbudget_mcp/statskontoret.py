@@ -46,6 +46,24 @@ TAG_RE = re.compile(r"<[^>]+>")
 UPDATED_RE = re.compile(r"Senast uppdaterad\s+(\d{4}-\d{2}-\d{2})")
 
 
+class SyncError(Exception):
+    """Raised when a sync cannot produce a complete snapshot.
+
+    Contains details about what succeeded and what failed so the
+    caller can decide whether to fall back to cached data.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        has_expenditure: bool = False,
+        has_income: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.has_expenditure = has_expenditure
+        self.has_income = has_income
+
+
 @dataclass
 class DataSourceMeta:
     source: str
@@ -356,7 +374,17 @@ class StatskontoretClient:
         return path
 
     async def sync(self, year: int | None = None) -> SyncStatus:
-        """Download and parse latest data from Statskontoret."""
+        """Download and parse latest data from Statskontoret.
+
+        Stages both datasets in local variables and only commits
+        to in-memory state when both expenditure AND income are
+        present and non-empty. Raises SyncError if either dataset
+        is missing after the download/parse phase.
+
+        This guarantees that self._expenditure_data and
+        self._income_data are always from the same sync, never
+        a mix of old and new data.
+        """
         links, source_dates = await self.discover_download_links(
             year=year,
         )
@@ -364,11 +392,14 @@ class StatskontoretClient:
         latest_source_date = (
             max(source_dates) if source_dates else None
         )
+
+        # Stage 1: download and parse into local variables
         files_downloaded: list[str] = []
-        new_expenditure: list[ExpenditureRow] = []
-        new_income: list[IncomeRow] = []
+        staged_expenditure: list[ExpenditureRow] = []
+        staged_income: list[IncomeRow] = []
         exp_seen = False
         inc_seen = False
+
         for link in links:
             url = link["url"]
             file_type = link["type"]
@@ -381,17 +412,35 @@ class StatskontoretClient:
             files_downloaded.append(filename)
             csv_content = self._extract_csv_from_zip(path)
             if csv_content and file_type == "expenditure":
-                new_expenditure = self._parse_expenditure_csv(
+                staged_expenditure = self._parse_expenditure_csv(
                     csv_content,
                 )
                 exp_seen = True
             elif csv_content and file_type == "income":
-                new_income = self._parse_income_csv(csv_content)
+                staged_income = self._parse_income_csv(csv_content)
                 inc_seen = True
-        if new_expenditure:
-            self._expenditure_data = new_expenditure
-        if new_income:
-            self._income_data = new_income
+
+        # Stage 2: validate completeness before committing
+        missing: list[str] = []
+        if not staged_expenditure:
+            missing.append("expenditure")
+        if not staged_income:
+            missing.append("income")
+
+        if missing:
+            raise SyncError(
+                f"Incomplete sync: missing {', '.join(missing)}. "
+                f"Downloaded {len(files_downloaded)} file(s): "
+                f"{files_downloaded}. "
+                f"In-memory data NOT updated.",
+                has_expenditure=bool(staged_expenditure),
+                has_income=bool(staged_income),
+            )
+
+        # Stage 3: commit atomically (both or neither)
+        self._expenditure_data = staged_expenditure
+        self._income_data = staged_income
+
         source_meta = DataSourceMeta(
             source="Statskontoret \u00d6ppna Data",
             description="Annual budget outturn for central government",
