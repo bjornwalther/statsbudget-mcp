@@ -81,11 +81,27 @@ CREATE INDEX IF NOT EXISTS idx_scb_revenue_year ON scb_revenue(year);
 CREATE INDEX IF NOT EXISTS idx_scb_quota_year ON scb_quota(year);
 """
 
-_EXPENDITURE_REQUIRED_KEYS = {"expenditure_area_id", "expenditure_area_name", "appropriation_id", "appropriation_name", "year"}
-_INCOME_REQUIRED_KEYS = {"income_type", "income_type_name", "income_main_group", "income_main_group_name", "income_title", "income_title_name", "year"}
+_EXPENDITURE_REQUIRED_KEYS = {
+    "expenditure_area_id",
+    "expenditure_area_name",
+    "appropriation_id",
+    "appropriation_name",
+    "year",
+}
+_INCOME_REQUIRED_KEYS = {
+    "income_type",
+    "income_type_name",
+    "income_main_group",
+    "income_main_group_name",
+    "income_title",
+    "income_title_name",
+    "year",
+}
 
 
-def _validate_rows(rows: list[dict[str, Any]], required_keys: set[str]) -> bool:
+def _validate_rows(
+    rows: list[dict[str, Any]], required_keys: set[str],
+) -> bool:
     """Validate that all rows contain required keys with correct types."""
     if not rows:
         return True
@@ -152,12 +168,18 @@ class BudgetCache:
             return False
         if not self._snapshot_complete():
             return False
-        exp_count = self._conn.execute("SELECT COUNT(*) FROM expenditure").fetchone()[0]
-        inc_count = self._conn.execute("SELECT COUNT(*) FROM income").fetchone()[0]
+        exp_count = self._conn.execute(
+            "SELECT COUNT(*) FROM expenditure",
+        ).fetchone()[0]
+        inc_count = self._conn.execute(
+            "SELECT COUNT(*) FROM income",
+        ).fetchone()[0]
         return exp_count > 0 and inc_count > 0
 
     def get_meta(self, key: str) -> str | None:
-        cur = self._conn.execute("SELECT value FROM meta WHERE key = ?", (key,))
+        cur = self._conn.execute(
+            "SELECT value FROM meta WHERE key = ?", (key,),
+        )
         row = cur.fetchone()
         return row[0] if row else None
 
@@ -193,7 +215,11 @@ class BudgetCache:
 
     def invalidate(self) -> None:
         """Clear all cached data (schema mismatch recovery)."""
-        for table in ("expenditure", "income", "scb_revenue", "scb_quota", "meta"):
+        tables = (
+            "expenditure", "income", "scb_revenue",
+            "scb_quota", "meta",
+        )
+        for table in tables:
             self._conn.execute(f"DELETE FROM {table}")
         self._conn.commit()
 
@@ -212,7 +238,9 @@ class BudgetCache:
         but snapshot_complete is set to false.
         """
         if sync_utc is None:
-            sync_utc = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            sync_utc = datetime.now(timezone.utc).isoformat(
+                timespec="seconds",
+            )
 
         self._conn.execute("DELETE FROM expenditure")
         self._conn.execute("DELETE FROM income")
@@ -223,10 +251,15 @@ class BudgetCache:
                 "INSERT INTO expenditure VALUES (?,?,?,?,?,?,?,?,?,?)",
                 [
                     (
-                        r["expenditure_area_id"], r["expenditure_area_name"],
-                        r["appropriation_id"], r["appropriation_name"],
-                        r["year"], r.get("budget_msek"), r.get("amendment_budgets_msek"),
-                        r.get("outcome_msek"), r.get("opening_balance_msek"),
+                        r["expenditure_area_id"],
+                        r["expenditure_area_name"],
+                        r["appropriation_id"],
+                        r["appropriation_name"],
+                        r["year"],
+                        r.get("budget_msek"),
+                        r.get("amendment_budgets_msek"),
+                        r.get("outcome_msek"),
+                        r.get("opening_balance_msek"),
                         r.get("closing_balance_msek"),
                     )
                     for r in expenditure
@@ -240,10 +273,15 @@ class BudgetCache:
                 "INSERT INTO income VALUES (?,?,?,?,?,?,?,?,?)",
                 [
                     (
-                        r["income_type"], r["income_type_name"],
-                        r["income_main_group"], r["income_main_group_name"],
-                        r["income_title"], r["income_title_name"],
-                        r["year"], r.get("budget_msek"), r.get("outcome_msek"),
+                        r["income_type"],
+                        r["income_type_name"],
+                        r["income_main_group"],
+                        r["income_main_group_name"],
+                        r["income_title"],
+                        r["income_title_name"],
+                        r["year"],
+                        r.get("budget_msek"),
+                        r.get("outcome_msek"),
                     )
                     for r in income
                 ],
@@ -265,7 +303,11 @@ class BudgetCache:
         )
         self._conn.commit()
 
-        return {"expenditure": exp_count, "income": inc_count, "complete": complete}
+        return {
+            "expenditure": exp_count,
+            "income": inc_count,
+            "complete": complete,
+        }
 
     # -- Expenditure --
 
@@ -276,10 +318,15 @@ class BudgetCache:
             "INSERT INTO expenditure VALUES (?,?,?,?,?,?,?,?,?,?)",
             [
                 (
-                    r["expenditure_area_id"], r["expenditure_area_name"],
-                    r["appropriation_id"], r["appropriation_name"],
-                    r["year"], r.get("budget_msek"), r.get("amendment_budgets_msek"),
-                    r.get("outcome_msek"), r.get("opening_balance_msek"),
+                    r["expenditure_area_id"],
+                    r["expenditure_area_name"],
+                    r["appropriation_id"],
+                    r["appropriation_name"],
+                    r["year"],
+                    r.get("budget_msek"),
+                    r.get("amendment_budgets_msek"),
+                    r.get("outcome_msek"),
+                    r.get("opening_balance_msek"),
                     r.get("closing_balance_msek"),
                 )
                 for r in rows
@@ -289,17 +336,27 @@ class BudgetCache:
         self._conn.commit()
         return len(rows)
 
-    def load_expenditure(self, year: int | None = None) -> list[dict[str, Any]]:
+    def load_expenditure(
+        self, year: int | None = None,
+    ) -> list[dict[str, Any]]:
         if not self._schema_valid():
-            print("Cache schema mismatch, treating as empty.", file=sys.stderr)
+            print(
+                "Cache schema mismatch, treating as empty.",
+                file=sys.stderr,
+            )
             return []
         if year is not None:
-            cur = self._conn.execute("SELECT * FROM expenditure WHERE year = ?", (year,))
+            cur = self._conn.execute(
+                "SELECT * FROM expenditure WHERE year = ?", (year,),
+            )
         else:
             cur = self._conn.execute("SELECT * FROM expenditure")
         rows = [dict(row) for row in cur.fetchall()]
         if not _validate_rows(rows, _EXPENDITURE_REQUIRED_KEYS):
-            print("Cache expenditure data malformed, treating as empty.", file=sys.stderr)
+            print(
+                "Cache expenditure data malformed, treating as empty.",
+                file=sys.stderr,
+            )
             return []
         return rows
 
@@ -311,10 +368,15 @@ class BudgetCache:
             "INSERT INTO income VALUES (?,?,?,?,?,?,?,?,?)",
             [
                 (
-                    r["income_type"], r["income_type_name"],
-                    r["income_main_group"], r["income_main_group_name"],
-                    r["income_title"], r["income_title_name"],
-                    r["year"], r.get("budget_msek"), r.get("outcome_msek"),
+                    r["income_type"],
+                    r["income_type_name"],
+                    r["income_main_group"],
+                    r["income_main_group_name"],
+                    r["income_title"],
+                    r["income_title_name"],
+                    r["year"],
+                    r.get("budget_msek"),
+                    r.get("outcome_msek"),
                 )
                 for r in rows
             ],
@@ -323,17 +385,27 @@ class BudgetCache:
         self._conn.commit()
         return len(rows)
 
-    def load_income(self, year: int | None = None) -> list[dict[str, Any]]:
+    def load_income(
+        self, year: int | None = None,
+    ) -> list[dict[str, Any]]:
         if not self._schema_valid():
-            print("Cache schema mismatch, treating as empty.", file=sys.stderr)
+            print(
+                "Cache schema mismatch, treating as empty.",
+                file=sys.stderr,
+            )
             return []
         if year is not None:
-            cur = self._conn.execute("SELECT * FROM income WHERE year = ?", (year,))
+            cur = self._conn.execute(
+                "SELECT * FROM income WHERE year = ?", (year,),
+            )
         else:
             cur = self._conn.execute("SELECT * FROM income")
         rows = [dict(row) for row in cur.fetchall()]
         if not _validate_rows(rows, _INCOME_REQUIRED_KEYS):
-            print("Cache income data malformed, treating as empty.", file=sys.stderr)
+            print(
+                "Cache income data malformed, treating as empty.",
+                file=sys.stderr,
+            )
             return []
         return rows
 
@@ -344,17 +416,30 @@ class BudgetCache:
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         self._conn.executemany(
             "INSERT INTO scb_revenue VALUES (?,?,?,?,?)",
-            [(r["tax_type_code"], r["tax_type_label"], r["year"], r.get("amount_msek"), now) for r in rows],
+            [
+                (
+                    r["tax_type_code"],
+                    r["tax_type_label"],
+                    r["year"],
+                    r.get("amount_msek"),
+                    now,
+                )
+                for r in rows
+            ],
         )
         self.set_meta("schema_version", SCHEMA_VERSION)
         self._conn.commit()
         return len(rows)
 
-    def load_scb_revenue(self, year: int | None = None) -> list[dict[str, Any]]:
+    def load_scb_revenue(
+        self, year: int | None = None,
+    ) -> list[dict[str, Any]]:
         if not self._schema_valid():
             return []
         if year is not None:
-            cur = self._conn.execute("SELECT * FROM scb_revenue WHERE year = ?", (year,))
+            cur = self._conn.execute(
+                "SELECT * FROM scb_revenue WHERE year = ?", (year,),
+            )
         else:
             cur = self._conn.execute("SELECT * FROM scb_revenue")
         return [dict(row) for row in cur.fetchall()]
@@ -366,17 +451,31 @@ class BudgetCache:
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         self._conn.executemany(
             "INSERT INTO scb_quota VALUES (?,?,?,?,?,?)",
-            [(r["tax_type_code"], r["tax_type_label"], r["year"], r.get("amount_msek"), r.get("share_of_gdp"), now) for r in rows],
+            [
+                (
+                    r["tax_type_code"],
+                    r["tax_type_label"],
+                    r["year"],
+                    r.get("amount_msek"),
+                    r.get("share_of_gdp"),
+                    now,
+                )
+                for r in rows
+            ],
         )
         self.set_meta("schema_version", SCHEMA_VERSION)
         self._conn.commit()
         return len(rows)
 
-    def load_scb_quota(self, year: int | None = None) -> list[dict[str, Any]]:
+    def load_scb_quota(
+        self, year: int | None = None,
+    ) -> list[dict[str, Any]]:
         if not self._schema_valid():
             return []
         if year is not None:
-            cur = self._conn.execute("SELECT * FROM scb_quota WHERE year = ?", (year,))
+            cur = self._conn.execute(
+                "SELECT * FROM scb_quota WHERE year = ?", (year,),
+            )
         else:
             cur = self._conn.execute("SELECT * FROM scb_quota")
         return [dict(row) for row in cur.fetchall()]
@@ -386,13 +485,20 @@ class BudgetCache:
     def get_stats(self) -> dict[str, Any]:
         """Cache statistics for diagnostics."""
         counts = {}
-        for table in ("expenditure", "income", "scb_revenue", "scb_quota"):
-            cur = self._conn.execute(f"SELECT COUNT(*) FROM {table}")
+        tables = (
+            "expenditure", "income", "scb_revenue", "scb_quota",
+        )
+        for table in tables:
+            cur = self._conn.execute(
+                f"SELECT COUNT(*) FROM {table}",
+            )
             counts[table] = cur.fetchone()[0]
 
-        years = set()
+        years: set[int] = set()
         for table in ("expenditure", "income"):
-            cur = self._conn.execute(f"SELECT DISTINCT year FROM {table}")
+            cur = self._conn.execute(
+                f"SELECT DISTINCT year FROM {table}",
+            )
             years.update(row[0] for row in cur.fetchall())
 
         return {
