@@ -38,7 +38,10 @@ ALLOWED_HOSTS = {"www.statskontoret.se", "statskontoret.se"}
 MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024  # 50 MB per file
 MAX_CSV_BYTES = 100 * 1024 * 1024  # 100 MB decompressed CSV
 
-HREF_RE = re.compile(r'<a\b[^>]*href=["\']([^"\']+)["\'][^>]*>([\s\S]*?)</a>', re.IGNORECASE)
+HREF_RE = re.compile(
+    r'<a\b[^>]*href=["\']([^"\']+)["\'][^>]*>([\s\S]*?)</a>',
+    re.IGNORECASE,
+)
 TAG_RE = re.compile(r"<[^>]+>")
 UPDATED_RE = re.compile(r"Senast uppdaterad\s+(\d{4}-\d{2}-\d{2})")
 
@@ -171,7 +174,11 @@ def _next_expected_update() -> str:
 def _classify_link(href: str, anchor_text: str) -> str:
     parsed = urlparse(href)
     params = parse_qs(parsed.query)
-    doc_type = (params.get("documentType") or params.get("DocumentType") or [""])[0].lower()
+    doc_type = (
+        params.get("documentType")
+        or params.get("DocumentType")
+        or [""]
+    )[0].lower()
     if "utgift" in doc_type:
         return "expenditure"
     if "inkomst" in doc_type:
@@ -187,7 +194,11 @@ def _classify_link(href: str, anchor_text: str) -> str:
 def _classify_format(href: str, anchor_text: str) -> str:
     parsed = urlparse(href)
     params = parse_qs(parsed.query)
-    ft = (params.get("fileType") or params.get("FileType") or [""])[0].lower()
+    ft = (
+        params.get("fileType")
+        or params.get("FileType")
+        or [""]
+    )[0].lower()
     if ft == "zip" or "csv" in anchor_text.lower():
         return "zip"
     if ft == "excel" or "excel" in anchor_text.lower():
@@ -215,7 +226,9 @@ class StatskontoretClient:
         data_dir: str | Path | None = None,
         timeout: float = 60.0,
     ) -> None:
-        self._client = httpx.AsyncClient(timeout=timeout, follow_redirects=True)
+        self._client = httpx.AsyncClient(
+            timeout=timeout, follow_redirects=True,
+        )
         if data_dir is not None:
             self._data_dir = Path(data_dir)
         else:
@@ -230,11 +243,16 @@ class StatskontoretClient:
     def _load_meta(self) -> None:
         if self._meta_path.exists():
             try:
-                raw = json.loads(self._meta_path.read_text(encoding="utf-8"))
+                raw = json.loads(
+                    self._meta_path.read_text(encoding="utf-8"),
+                )
                 self._sync_meta = SyncStatus(
                     last_sync=raw.get("last_sync"),
                     next_expected_update=raw.get("next_expected_update"),
-                    sources=[DataSourceMeta(**s) for s in raw.get("sources", [])],
+                    sources=[
+                        DataSourceMeta(**s)
+                        for s in raw.get("sources", [])
+                    ],
                 )
             except (json.JSONDecodeError, TypeError):
                 pass
@@ -244,11 +262,22 @@ class StatskontoretClient:
             "last_sync": self._sync_meta.last_sync,
             "next_expected_update": self._sync_meta.next_expected_update,
             "sources": [
-                {"source": s.source, "description": s.description, "publication_cadence": s.publication_cadence, "last_synced_at": s.last_synced_at, "source_last_updated": s.source_last_updated, "files_downloaded": s.files_downloaded, "years_covered": s.years_covered}
+                {
+                    "source": s.source,
+                    "description": s.description,
+                    "publication_cadence": s.publication_cadence,
+                    "last_synced_at": s.last_synced_at,
+                    "source_last_updated": s.source_last_updated,
+                    "files_downloaded": s.files_downloaded,
+                    "years_covered": s.years_covered,
+                }
                 for s in self._sync_meta.sources
             ],
         }
-        self._meta_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        self._meta_path.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -260,7 +289,7 @@ class StatskontoretClient:
         await self.close()
 
     async def discover_download_links(
-        self, year: int | None = None
+        self, year: int | None = None,
     ) -> tuple[list[dict[str, str]], list[str]]:
         """Scrape the arsutfall page for download links."""
         url = f"{BASE_URL}{ARSUTFALL_PAGE}"
@@ -283,18 +312,33 @@ class StatskontoretClient:
             )
             if not is_data_file:
                 continue
-            resolved = raw_href if raw_href.startswith("http") else f"{BASE_URL}{raw_href}"
+            if raw_href.startswith("http"):
+                resolved = raw_href
+            else:
+                resolved = f"{BASE_URL}{raw_href}"
             if not _is_allowed_host(resolved):
-                print(f"Skipping URL from disallowed host: {resolved}", file=sys.stderr)
+                print(
+                    f"Skipping URL from disallowed host: {resolved}",
+                    file=sys.stderr,
+                )
                 continue
             if resolved in seen_urls:
                 continue
             seen_urls.add(resolved)
             file_type = _classify_link(resolved, anchor_text)
             file_format = _classify_format(resolved, anchor_text)
-            if file_type == "unknown" or file_format == "unknown" or file_format == "xlsx":
+            if (
+                file_type == "unknown"
+                or file_format == "unknown"
+                or file_format == "xlsx"
+            ):
                 continue
-            links.append({"url": resolved, "text": anchor_text, "type": file_type, "format": file_format})
+            links.append({
+                "url": resolved,
+                "text": anchor_text,
+                "type": file_type,
+                "format": file_format,
+            })
         return links, source_dates
 
     async def download_file(self, url: str, filename: str) -> Path:
@@ -313,9 +357,13 @@ class StatskontoretClient:
 
     async def sync(self, year: int | None = None) -> SyncStatus:
         """Download and parse latest data from Statskontoret."""
-        links, source_dates = await self.discover_download_links(year=year)
+        links, source_dates = await self.discover_download_links(
+            year=year,
+        )
         sync_time = _now_iso()
-        latest_source_date = max(source_dates) if source_dates else None
+        latest_source_date = (
+            max(source_dates) if source_dates else None
+        )
         files_downloaded: list[str] = []
         new_expenditure: list[ExpenditureRow] = []
         new_income: list[IncomeRow] = []
@@ -333,7 +381,9 @@ class StatskontoretClient:
             files_downloaded.append(filename)
             csv_content = self._extract_csv_from_zip(path)
             if csv_content and file_type == "expenditure":
-                new_expenditure = self._parse_expenditure_csv(csv_content)
+                new_expenditure = self._parse_expenditure_csv(
+                    csv_content,
+                )
                 exp_seen = True
             elif csv_content and file_type == "income":
                 new_income = self._parse_income_csv(csv_content)
@@ -345,7 +395,9 @@ class StatskontoretClient:
         source_meta = DataSourceMeta(
             source="Statskontoret \u00d6ppna Data",
             description="Annual budget outturn for central government",
-            publication_cadence="Expenditure: March. Income: March + June.",
+            publication_cadence=(
+                "Expenditure: March. Income: March + June."
+            ),
             last_synced_at=sync_time,
             source_last_updated=latest_source_date,
             files_downloaded=files_downloaded,
@@ -365,29 +417,40 @@ class StatskontoretClient:
     def get_publication_schedule(self) -> dict[str, Any]:
         return {
             "schedule": PUBLICATION_SCHEDULE,
-            "summary": "Statskontoret publicerar ny budgetdata i mars och juni.",
+            "summary": (
+                "Statskontoret publicerar ny budgetdata"
+                " i mars och juni."
+            ),
             "next_expected_update": _next_expected_update(),
             "sync_recommendation": "Sync in March and June each year.",
         }
 
-    def load_from_csv(self, expenditure_path=None, income_path=None) -> None:
+    def load_from_csv(
+        self, expenditure_path=None, income_path=None,
+    ) -> None:
         if expenditure_path:
-            self._expenditure_data = self._parse_expenditure_csv(Path(expenditure_path).read_text(encoding="utf-8"))
+            content = Path(expenditure_path).read_text(encoding="utf-8")
+            self._expenditure_data = self._parse_expenditure_csv(content)
         if income_path:
-            self._income_data = self._parse_income_csv(Path(income_path).read_text(encoding="utf-8"))
+            content = Path(income_path).read_text(encoding="utf-8")
+            self._income_data = self._parse_income_csv(content)
 
     def _extract_csv_from_zip(self, zip_path: Path) -> str | None:
         """Extract first CSV from ZIP with decompression size guard."""
         try:
             with zipfile.ZipFile(zip_path, "r") as zf:
-                csv_files = [n for n in zf.namelist() if n.lower().endswith(".csv")]
+                csv_files = [
+                    n for n in zf.namelist()
+                    if n.lower().endswith(".csv")
+                ]
                 if not csv_files:
                     return None
                 info = zf.getinfo(csv_files[0])
                 if info.file_size > MAX_CSV_BYTES:
                     print(
                         f"CSV entry too large: {info.file_size} bytes "
-                        f"(max {MAX_CSV_BYTES}). Skipping {csv_files[0]}",
+                        f"(max {MAX_CSV_BYTES}). "
+                        f"Skipping {csv_files[0]}",
                         file=sys.stderr,
                     )
                     return None
@@ -396,7 +459,9 @@ class StatskontoretClient:
         except (zipfile.BadZipFile, KeyError, UnicodeDecodeError):
             return None
 
-    def _parse_expenditure_csv(self, content: str) -> list[ExpenditureRow]:
+    def _parse_expenditure_csv(
+        self, content: str,
+    ) -> list[ExpenditureRow]:
         rows: list[ExpenditureRow] = []
         reader = csv.DictReader(io.StringIO(content), delimiter=";")
         if not reader.fieldnames:
@@ -408,15 +473,33 @@ class StatskontoretClient:
                 continue
             rows.append(ExpenditureRow(
                 expenditure_area_id=area_id,
-                expenditure_area_name=record.get(col_map["area_name"], "").strip(),
-                appropriation_id=record.get(col_map["approp_id"], "").strip(),
-                appropriation_name=record.get(col_map["approp_name"], "").strip(),
-                year=_parse_int_safe(record.get(col_map["year"], "0")),
-                budget_msek=_parse_swedish_decimal(record.get(col_map["budget"], "")),
-                amendment_budgets_msek=_parse_swedish_decimal(record.get(col_map["amendments"], "")),
-                outcome_msek=_parse_swedish_decimal(record.get(col_map["outcome"], "")),
-                opening_balance_msek=_parse_swedish_decimal(record.get(col_map["opening"], "")),
-                closing_balance_msek=_parse_swedish_decimal(record.get(col_map["closing"], "")),
+                expenditure_area_name=record.get(
+                    col_map["area_name"], "",
+                ).strip(),
+                appropriation_id=record.get(
+                    col_map["approp_id"], "",
+                ).strip(),
+                appropriation_name=record.get(
+                    col_map["approp_name"], "",
+                ).strip(),
+                year=_parse_int_safe(
+                    record.get(col_map["year"], "0"),
+                ),
+                budget_msek=_parse_swedish_decimal(
+                    record.get(col_map["budget"], ""),
+                ),
+                amendment_budgets_msek=_parse_swedish_decimal(
+                    record.get(col_map["amendments"], ""),
+                ),
+                outcome_msek=_parse_swedish_decimal(
+                    record.get(col_map["outcome"], ""),
+                ),
+                opening_balance_msek=_parse_swedish_decimal(
+                    record.get(col_map["opening"], ""),
+                ),
+                closing_balance_msek=_parse_swedish_decimal(
+                    record.get(col_map["closing"], ""),
+                ),
             ))
         return rows
 
@@ -427,19 +510,37 @@ class StatskontoretClient:
             return rows
         col_map = self._map_income_columns(reader.fieldnames)
         for record in reader:
-            income_type = record.get(col_map["income_type"], "").strip()
+            income_type = record.get(
+                col_map["income_type"], "",
+            ).strip()
             if not income_type or not income_type[0].isdigit():
                 continue
             rows.append(IncomeRow(
                 income_type=income_type,
-                income_type_name=record.get(col_map["income_type_name"], "").strip(),
-                income_main_group=record.get(col_map["main_group"], "").strip(),
-                income_main_group_name=record.get(col_map["main_group_name"], "").strip(),
-                income_title=record.get(col_map["title"], "").strip(),
-                income_title_name=record.get(col_map["title_name"], "").strip(),
-                year=_parse_int_safe(record.get(col_map["year"], "0")),
-                budget_msek=_parse_swedish_decimal(record.get(col_map["budget"], "")),
-                outcome_msek=_parse_swedish_decimal(record.get(col_map["outcome"], "")),
+                income_type_name=record.get(
+                    col_map["income_type_name"], "",
+                ).strip(),
+                income_main_group=record.get(
+                    col_map["main_group"], "",
+                ).strip(),
+                income_main_group_name=record.get(
+                    col_map["main_group_name"], "",
+                ).strip(),
+                income_title=record.get(
+                    col_map["title"], "",
+                ).strip(),
+                income_title_name=record.get(
+                    col_map["title_name"], "",
+                ).strip(),
+                year=_parse_int_safe(
+                    record.get(col_map["year"], "0"),
+                ),
+                budget_msek=_parse_swedish_decimal(
+                    record.get(col_map["budget"], ""),
+                ),
+                outcome_msek=_parse_swedish_decimal(
+                    record.get(col_map["outcome"], ""),
+                ),
             ))
         return rows
 
@@ -448,17 +549,53 @@ class StatskontoretClient:
         mapping = {}
         for name in fieldnames:
             lower = name.lower().strip()
-            if lower.startswith("utgiftsomr\u00e5de") and "namn" not in lower and "utfalls" not in lower: mapping.setdefault("area_id", name)
-            elif "utgiftsomr\u00e5desnamn" in lower and "utfalls" not in lower: mapping.setdefault("area_name", name)
-            elif lower == "anslag": mapping.setdefault("approp_id", name)
-            elif "anslagsnamn" in lower and "utfalls" not in lower: mapping.setdefault("approp_name", name)
-            elif lower in ("\u00e5r", "ar", "year"): mapping.setdefault("year", name)
-            elif "statens budget" in lower: mapping.setdefault("budget", name)
-            elif "\u00e4ndringsbudget" in lower or "andringsbudget" in lower: mapping.setdefault("amendments", name)
-            elif lower == "utfall": mapping.setdefault("outcome", name)
-            elif "ing\u00e5ende" in lower or "ingaende" in lower: mapping.setdefault("opening", name)
-            elif "utg\u00e5ende" in lower or "utgaende" in lower: mapping.setdefault("closing", name)
-        for k, v in {"area_id": "Utgiftsomr\u00e5de", "area_name": "Utgiftsomr\u00e5desnamn", "approp_id": "Anslag", "approp_name": "Anslagsnamn", "year": "\u00c5r", "budget": "Statens budget", "amendments": "\u00c4ndringsbudgetar", "outcome": "Utfall", "opening": "Ing\u00e5ende \u00f6verf\u00f6ringsbelopp", "closing": "Utg\u00e5ende \u00f6verf\u00f6ringsbelopp"}.items():
+            if (
+                lower.startswith("utgiftsomr\u00e5de")
+                and "namn" not in lower
+                and "utfalls" not in lower
+            ):
+                mapping.setdefault("area_id", name)
+            elif (
+                "utgiftsomr\u00e5desnamn" in lower
+                and "utfalls" not in lower
+            ):
+                mapping.setdefault("area_name", name)
+            elif lower == "anslag":
+                mapping.setdefault("approp_id", name)
+            elif (
+                "anslagsnamn" in lower
+                and "utfalls" not in lower
+            ):
+                mapping.setdefault("approp_name", name)
+            elif lower in ("\u00e5r", "ar", "year"):
+                mapping.setdefault("year", name)
+            elif "statens budget" in lower:
+                mapping.setdefault("budget", name)
+            elif (
+                "\u00e4ndringsbudget" in lower
+                or "andringsbudget" in lower
+            ):
+                mapping.setdefault("amendments", name)
+            elif lower == "utfall":
+                mapping.setdefault("outcome", name)
+            elif "ing\u00e5ende" in lower or "ingaende" in lower:
+                mapping.setdefault("opening", name)
+            elif "utg\u00e5ende" in lower or "utgaende" in lower:
+                mapping.setdefault("closing", name)
+
+        _exp_defaults = {
+            "area_id": "Utgiftsomr\u00e5de",
+            "area_name": "Utgiftsomr\u00e5desnamn",
+            "approp_id": "Anslag",
+            "approp_name": "Anslagsnamn",
+            "year": "\u00c5r",
+            "budget": "Statens budget",
+            "amendments": "\u00c4ndringsbudgetar",
+            "outcome": "Utfall",
+            "opening": "Ing\u00e5ende \u00f6verf\u00f6ringsbelopp",
+            "closing": "Utg\u00e5ende \u00f6verf\u00f6ringsbelopp",
+        }
+        for k, v in _exp_defaults.items():
             mapping.setdefault(k, v)
         return mapping
 
@@ -467,55 +604,137 @@ class StatskontoretClient:
         mapping = {}
         for name in fieldnames:
             lower = name.lower().strip()
-            if lower == "inkomsttyp" or (lower.startswith("inkomsttyp") and "namn" not in lower and "utfalls" not in lower): mapping.setdefault("income_type", name)
-            elif "inkomsttypsnamn" in lower and "utfalls" not in lower: mapping.setdefault("income_type_name", name)
-            elif "inkomsthuvudgrupp" in lower and "namn" not in lower and "utfalls" not in lower: mapping.setdefault("main_group", name)
-            elif "inkomsthuvudgruppsnamn" in lower and "utfalls" not in lower: mapping.setdefault("main_group_name", name)
-            elif lower == "inkomsttitel" or (lower.startswith("inkomsttitel") and "namn" not in lower and "grupp" not in lower and "utfalls" not in lower): mapping.setdefault("title", name)
-            elif "inkomsttitelsnamn" in lower and "utfalls" not in lower: mapping.setdefault("title_name", name)
-            elif lower in ("\u00e5r", "ar", "year"): mapping.setdefault("year", name)
-            elif "statens budget" in lower: mapping.setdefault("budget", name)
-            elif lower == "utfall": mapping.setdefault("outcome", name)
-        for k, v in {"income_type": "Inkomsttyp", "income_type_name": "Inkomsttypsnamn", "main_group": "Inkomsthuvudgrupp", "main_group_name": "Inkomsthuvudgruppsnamn", "title": "Inkomsttitel", "title_name": "Inkomsttitelsnamn", "year": "\u00c5r", "budget": "Statens budget", "outcome": "Utfall"}.items():
+            if lower == "inkomsttyp" or (
+                lower.startswith("inkomsttyp")
+                and "namn" not in lower
+                and "utfalls" not in lower
+            ):
+                mapping.setdefault("income_type", name)
+            elif (
+                "inkomsttypsnamn" in lower
+                and "utfalls" not in lower
+            ):
+                mapping.setdefault("income_type_name", name)
+            elif (
+                "inkomsthuvudgrupp" in lower
+                and "namn" not in lower
+                and "utfalls" not in lower
+            ):
+                mapping.setdefault("main_group", name)
+            elif (
+                "inkomsthuvudgruppsnamn" in lower
+                and "utfalls" not in lower
+            ):
+                mapping.setdefault("main_group_name", name)
+            elif lower == "inkomsttitel" or (
+                lower.startswith("inkomsttitel")
+                and "namn" not in lower
+                and "grupp" not in lower
+                and "utfalls" not in lower
+            ):
+                mapping.setdefault("title", name)
+            elif (
+                "inkomsttitelsnamn" in lower
+                and "utfalls" not in lower
+            ):
+                mapping.setdefault("title_name", name)
+            elif lower in ("\u00e5r", "ar", "year"):
+                mapping.setdefault("year", name)
+            elif "statens budget" in lower:
+                mapping.setdefault("budget", name)
+            elif lower == "utfall":
+                mapping.setdefault("outcome", name)
+
+        _inc_defaults = {
+            "income_type": "Inkomsttyp",
+            "income_type_name": "Inkomsttypsnamn",
+            "main_group": "Inkomsthuvudgrupp",
+            "main_group_name": "Inkomsthuvudgruppsnamn",
+            "title": "Inkomsttitel",
+            "title_name": "Inkomsttitelsnamn",
+            "year": "\u00c5r",
+            "budget": "Statens budget",
+            "outcome": "Utfall",
+        }
+        for k, v in _inc_defaults.items():
             mapping.setdefault(k, v)
         return mapping
 
     def get_budget_overview(self, year):
-        year_exp = [r for r in self._expenditure_data if r.year == year]
+        year_exp = [
+            r for r in self._expenditure_data if r.year == year
+        ]
         year_inc = [r for r in self._income_data if r.year == year]
-        area_map = {}
+        area_map: dict[str, AreaSummary] = {}
         for row in year_exp:
             aid = row.expenditure_area_id
             if aid not in area_map:
-                area_map[aid] = AreaSummary(area_id=aid, area_name=row.expenditure_area_name, budget_msek=0.0, outcome_msek=0.0, delta_msek=0.0)
-            if row.budget_msek is not None: area_map[aid].budget_msek += row.budget_msek
-            if row.outcome_msek is not None: area_map[aid].outcome_msek += row.outcome_msek
-        for area in area_map.values(): area.delta_msek = area.outcome_msek - area.budget_msek
+                area_map[aid] = AreaSummary(
+                    area_id=aid,
+                    area_name=row.expenditure_area_name,
+                    budget_msek=0.0,
+                    outcome_msek=0.0,
+                    delta_msek=0.0,
+                )
+            if row.budget_msek is not None:
+                area_map[aid].budget_msek += row.budget_msek
+            if row.outcome_msek is not None:
+                area_map[aid].outcome_msek += row.outcome_msek
+        for area in area_map.values():
+            area.delta_msek = area.outcome_msek - area.budget_msek
         total_exp = sum(a.outcome_msek for a in area_map.values())
         total_inc = sum(r.outcome_msek or 0.0 for r in year_inc)
-        return BudgetOverview(year=year, total_expenditure_msek=total_exp, total_income_msek=total_inc, balance_msek=total_inc - total_exp, areas=sorted(area_map.values(), key=lambda a: a.area_id))
+        return BudgetOverview(
+            year=year,
+            total_expenditure_msek=total_exp,
+            total_income_msek=total_inc,
+            balance_msek=total_inc - total_exp,
+            areas=sorted(
+                area_map.values(), key=lambda a: a.area_id,
+            ),
+        )
 
     def get_expenditure_area(self, area_id, year):
-        return [r for r in self._expenditure_data if r.expenditure_area_id == area_id and r.year == year]
+        return [
+            r for r in self._expenditure_data
+            if r.expenditure_area_id == area_id and r.year == year
+        ]
 
     def compare_budgets(self, year_a, year_b):
-        oa = self.get_budget_overview(year_a); ob = self.get_budget_overview(year_b)
-        aa = {a.area_id: a for a in oa.areas}; ab = {a.area_id: a for a in ob.areas}
+        oa = self.get_budget_overview(year_a)
+        ob = self.get_budget_overview(year_b)
+        aa = {a.area_id: a for a in oa.areas}
+        ab = {a.area_id: a for a in ob.areas}
         result = []
         for aid in sorted(set(aa) | set(ab)):
             a, b = aa.get(aid), ab.get(aid)
-            va, vb = (a.outcome_msek if a else 0.0), (b.outcome_msek if b else 0.0)
-            d = vb - va; p = round(d / va * 100, 2) if va != 0 else None
-            result.append({"area_id": aid, "area_name": (b or a).area_name if (b or a) else aid, f"outcome_{year_a}_msek": va, f"outcome_{year_b}_msek": vb, "delta_msek": d, "delta_pct": p})
+            va = a.outcome_msek if a else 0.0
+            vb = b.outcome_msek if b else 0.0
+            d = vb - va
+            p = round(d / va * 100, 2) if va != 0 else None
+            area_name = (b or a).area_name if (b or a) else aid
+            result.append({
+                "area_id": aid,
+                "area_name": area_name,
+                f"outcome_{year_a}_msek": va,
+                f"outcome_{year_b}_msek": vb,
+                "delta_msek": d,
+                "delta_pct": p,
+            })
         return result
 
     def get_available_years(self):
-        years = set()
-        for r in self._expenditure_data: years.add(r.year)
-        for r in self._income_data: years.add(r.year)
+        years: set[int] = set()
+        for r in self._expenditure_data:
+            years.add(r.year)
+        for r in self._income_data:
+            years.add(r.year)
         return sorted(years)
 
     @property
-    def expenditure_data(self): return self._expenditure_data
+    def expenditure_data(self):
+        return self._expenditure_data
+
     @property
-    def income_data(self): return self._income_data
+    def income_data(self):
+        return self._income_data
