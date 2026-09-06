@@ -4,6 +4,7 @@ import pytest
 
 from statsbudget_mcp.server import (
     EXPENDITURE_AREAS,
+    _require_cache,
     _require_scb,
     _require_sk,
     mcp,
@@ -54,6 +55,17 @@ class TestClientGuards:
         finally:
             mod._sk = original
 
+    def test_require_cache_raises_when_not_initialized(self):
+        import statsbudget_mcp.server as mod
+
+        original = mod._cache
+        mod._cache = None
+        try:
+            with pytest.raises(RuntimeError, match="Cache not initialized"):
+                _require_cache()
+        finally:
+            mod._cache = original
+
 
 class TestToolRegistration:
     """Verify all expected tools are registered on the MCP server."""
@@ -86,10 +98,11 @@ class TestToolRegistration:
         assert "get_sync_status" in names
         assert "get_publication_schedule" in names
         assert "get_available_years" in names
+        assert "get_cache_stats" in names
 
     def test_total_tool_count(self):
         names = self._tool_names()
-        assert len(names) == 13
+        assert len(names) == 14
 
 
 class TestEntryPoint:
