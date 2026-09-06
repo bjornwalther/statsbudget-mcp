@@ -28,6 +28,14 @@ TABLES = {
 MAX_RETRIES = 2
 RETRY_BASE_DELAY = 1.0  # seconds, doubles each retry
 
+# Explicit allowlist of transient exceptions that warrant retry.
+# All other exceptions propagate immediately.
+_RETRYABLE_EXCEPTIONS = (
+    httpx.TimeoutException,
+    httpx.ConnectError,
+    httpx.HTTPStatusError,
+)
+
 TAX_TYPE_LABELS: dict[str, str] = {
     "101": "Skatt p\u00e5 arbete",
     "102": "Direkta skatter p\u00e5 arbete",
@@ -89,11 +97,16 @@ QUOTA_TYPE_LABELS: dict[str, str] = {
 
 
 def _is_retryable(exc: Exception) -> bool:
-    """Check if an exception warrants a retry."""
-    if isinstance(exc, httpx.TimeoutException):
+    """Check if an exception warrants a retry.
+
+    Only called for exceptions in _RETRYABLE_EXCEPTIONS.
+    TimeoutException and ConnectError are always retryable.
+    HTTPStatusError is retryable only for 5xx and 429.
+    """
+    if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError)):
         return True
-    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code >= 500:
-        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= 500 or exc.response.status_code == 429
     return False
 
 
@@ -121,7 +134,9 @@ class TaxQuotaRow:
 class SCBClient:
     """Async client for SCB PxWeb API (tax/revenue tables).
 
-    Includes exponential backoff retry on timeout and server errors.
+    Includes exponential backoff retry on timeout, connection errors,
+    and server errors (5xx/429). All other exceptions propagate
+    immediately without retry.
 
     Usage:
         async with SCBClient() as scb:
@@ -141,7 +156,13 @@ class SCBClient:
         await self.close()
 
     async def _post_query(self, table: str, query: dict[str, Any]) -> dict[str, Any]:
-        """POST a PxWeb query with retry on transient failures."""
+        """POST a PxWeb query with retry on transient failures.
+
+        Retries only on explicitly allowlisted exceptions:
+        TimeoutException, ConnectError, HTTPStatusError (5xx/429).
+        Unknown exceptions (e.g. JSONDecodeError, 4xx client errors)
+        propagate immediately.
+        """
         url = f"{BASE_URL}/{table}"
         last_exc: Exception | None = None
 
@@ -150,7 +171,7 @@ class SCBClient:
                 resp = await self._client.post(url, json=query)
                 resp.raise_for_status()
                 return resp.json()
-            except Exception as exc:
+            except _RETRYABLE_EXCEPTIONS as exc:
                 last_exc = exc
                 if attempt < MAX_RETRIES and _is_retryable(exc):
                     delay = RETRY_BASE_DELAY * (2 ** attempt)
