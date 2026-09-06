@@ -161,7 +161,9 @@ class TestZipSizeGuard:
     """_extract_csv_from_zip enforces MAX_CSV_BYTES."""
 
     def _make_zip(self, csv_content, name="data.csv"):
-        tmp = tempfile.NamedTemporaryFile(
+        # delete=False required: file must outlive close()
+        # so _extract_csv_from_zip can read it
+        tmp = tempfile.NamedTemporaryFile(  # noqa: SIM115
             suffix=".zip", delete=False,
         )
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -200,7 +202,7 @@ class TestZipSizeGuard:
             sk.MAX_CSV_BYTES = original
 
     def test_bad_zip_returns_none(self):
-        tmp = tempfile.NamedTemporaryFile(
+        tmp = tempfile.NamedTemporaryFile(  # noqa: SIM115
             suffix=".zip", delete=False,
         )
         tmp.write(b"not a zip")
@@ -215,7 +217,7 @@ class TestZipSizeGuard:
             os.unlink(tmp.name)
 
     def test_zip_without_csv_returns_none(self):
-        tmp = tempfile.NamedTemporaryFile(
+        tmp = tempfile.NamedTemporaryFile(  # noqa: SIM115
             suffix=".zip", delete=False,
         )
         with zipfile.ZipFile(tmp, "w") as zf:
