@@ -62,6 +62,24 @@ def _rows_to_dicts(rows: list) -> list[dict[str, Any]]:
     return [asdict(r) for r in rows]
 
 
+def _serialize_source(s: Any) -> dict[str, Any]:
+    """Serialize a DataSourceMeta to a stable dict.
+
+    Single source of truth for source serialization,
+    used by both sync_budget_data and get_sync_status.
+    """
+    return {
+        "source": s.source,
+        "description": s.description,
+        "publication_cadence": s.publication_cadence,
+        "last_synced_at": s.last_synced_at,
+        "source_last_updated": s.source_last_updated,
+        "files_downloaded": s.files_downloaded,
+        "years_covered": s.years_covered,
+        "income_revision": s.income_revision,
+    }
+
+
 @asynccontextmanager
 async def lifespan(server: FastMCP):
     """Initialize clients, load or sync data, tear down on exit."""
@@ -80,40 +98,57 @@ async def lifespan(server: FastMCP):
             )
         except _CACHE_LOAD_ERRORS as exc:
             print(
-                f"Cache load failed ({type(exc).__name__}): {exc}",
+                f"Cache load failed "
+                f"({type(exc).__name__}): {exc}",
                 file=sys.stderr,
             )
-            print("Will sync fresh data instead.", file=sys.stderr)
+            print(
+                "Will sync fresh data instead.",
+                file=sys.stderr,
+            )
             _cache.invalidate()
             try:
                 await _sync_and_cache(_sk, _cache)
             except _SYNC_ERRORS as sync_exc:
                 print(
-                    f"Sync also failed: {sync_exc}. Starting empty.",
+                    f"Sync also failed: {sync_exc}. "
+                    f"Starting empty.",
                     file=sys.stderr,
                 )
     else:
-        print("Cache empty or stale, syncing...", file=sys.stderr)
+        print(
+            "Cache empty or stale, syncing...",
+            file=sys.stderr,
+        )
         try:
             await _sync_and_cache(_sk, _cache)
-            print("Sync complete, data cached.", file=sys.stderr)
+            print(
+                "Sync complete, data cached.",
+                file=sys.stderr,
+            )
         except _SYNC_ERRORS as exc:
             print(
-                f"Sync failed ({type(exc).__name__}): {exc}",
+                f"Sync failed ({type(exc).__name__}): "
+                f"{exc}",
                 file=sys.stderr,
             )
             if _cache.is_populated():
                 try:
                     _load_from_cache(_sk, _cache)
-                    print("Fell back to stale cache.", file=sys.stderr)
+                    print(
+                        "Fell back to stale cache.",
+                        file=sys.stderr,
+                    )
                 except _CACHE_LOAD_ERRORS as load_exc:
                     print(
-                        f"Stale cache also unusable: {load_exc}",
+                        f"Stale cache also unusable: "
+                        f"{load_exc}",
                         file=sys.stderr,
                     )
             else:
                 print(
-                    "No cached data available. Starting empty.",
+                    "No cached data available. "
+                    "Starting empty.",
                     file=sys.stderr,
                 )
 
@@ -131,26 +166,26 @@ async def lifespan(server: FastMCP):
         _cache = None
 
 
-def _load_from_cache(sk: StatskontoretClient, cache: BudgetCache) -> None:
+def _load_from_cache(
+    sk: StatskontoretClient, cache: BudgetCache,
+) -> None:
     """Populate the Statskontoret client from cached data."""
     exp_rows = cache.load_expenditure()
     inc_rows = cache.load_income()
     sk._expenditure_data = [
-        ExpenditureRow(**{k: v for k, v in r.items()}) for r in exp_rows
+        ExpenditureRow(**{k: v for k, v in r.items()})
+        for r in exp_rows
     ]
     sk._income_data = [
-        IncomeRow(**{k: v for k, v in r.items()}) for r in inc_rows
+        IncomeRow(**{k: v for k, v in r.items()})
+        for r in inc_rows
     ]
 
 
 async def _sync_and_cache(
     sk: StatskontoretClient, cache: BudgetCache,
 ) -> None:
-    """Sync from Statskontoret and persist to cache atomically.
-
-    sync() guarantees both datasets are present or raises SyncError.
-    We only reach store_snapshot when the sync was complete.
-    """
+    """Sync from Statskontoret and persist to cache."""
     await sk.sync()
     cache.store_snapshot(
         expenditure=_rows_to_dicts(sk.expenditure_data),
@@ -161,11 +196,11 @@ async def _sync_and_cache(
 mcp = FastMCP(
     "statsbudget-mcp",
     instructions=(
-        "Swedish national budget data: expenditure outturn by area, "
-        "tax revenue from SCB, and tax quota analysis. "
-        "Budget data shows actual outturn (utfall) from Statskontoret, "
-        "not the originally proposed budget. "
-        "Data from SCB and Statskontoret."
+        "Swedish national budget data: expenditure outturn "
+        "by area, tax revenue from SCB, and tax quota "
+        "analysis. Budget data shows actual outturn (utfall) "
+        "from Statskontoret, not the originally proposed "
+        "budget. Data from SCB and Statskontoret."
     ),
     lifespan=lifespan,
 )
@@ -173,21 +208,28 @@ mcp = FastMCP(
 
 def _require_scb() -> SCBClient:
     if _scb is None:
-        raise RuntimeError("SCB client not initialized. Server not started?")
+        raise RuntimeError(
+            "SCB client not initialized. "
+            "Server not started?"
+        )
     return _scb
 
 
 def _require_sk() -> StatskontoretClient:
     if _sk is None:
         raise RuntimeError(
-            "Statskontoret client not initialized. Server not started?"
+            "Statskontoret client not initialized. "
+            "Server not started?"
         )
     return _sk
 
 
 def _require_cache() -> BudgetCache:
     if _cache is None:
-        raise RuntimeError("Cache not initialized. Server not started?")
+        raise RuntimeError(
+            "Cache not initialized. "
+            "Server not started?"
+        )
     return _cache
 
 
@@ -201,7 +243,8 @@ EXPENDITURE_AREAS = [
     ("07", "Internationellt bist\u00e5nd"),
     ("08", "Migration"),
     ("09", "H\u00e4lsov\u00e5rd, sjukv\u00e5rd och social omsorg"),
-    ("10", "Ekonomisk trygghet vid sjukdom och funktionsneds\u00e4ttning"),
+    ("10", "Ekonomisk trygghet vid sjukdom"
+     " och funktionsneds\u00e4ttning"),
     ("11", "Ekonomisk trygghet vid \u00e5lderdom"),
     ("12", "Ekonomisk trygghet f\u00f6r familjer och barn"),
     ("13", "Integration och j\u00e4mst\u00e4lldhet"),
@@ -232,11 +275,13 @@ _REVENUE_CATEGORY_MAP = {
 
 
 @mcp.tool()
-async def get_budget_overview(year: int) -> dict[str, Any]:
-    """Get the Swedish national budget outturn for a given year.
+async def get_budget_overview(
+    year: int,
+) -> dict[str, Any]:
+    """Get the Swedish national budget outturn for a year.
 
-    Returns actual expenditure outturn (not proposed budget), total
-    income, balance, and all 27 expenditure areas in MSEK.
+    Returns actual expenditure outturn (not proposed budget),
+    total income, balance, and all 27 expenditure areas in MSEK.
     Source: Statskontoret arsutfall (official statistics).
 
     Args:
@@ -248,7 +293,9 @@ async def get_budget_overview(year: int) -> dict[str, Any]:
         "year": overview.year,
         "data_type": "outturn",
         "source": "Statskontoret",
-        "total_expenditure_msek": overview.total_expenditure_msek,
+        "total_expenditure_msek": (
+            overview.total_expenditure_msek
+        ),
         "total_income_msek": overview.total_income_msek,
         "balance_msek": overview.balance_msek,
         "areas": [
@@ -268,10 +315,10 @@ async def get_budget_overview(year: int) -> dict[str, Any]:
 async def get_expenditure_area(
     area_id: str, year: int,
 ) -> dict[str, Any]:
-    """Drill down into a specific expenditure area (outturn data).
+    """Drill down into a specific expenditure area.
 
-    Returns all appropriations with both budget allocation and
-    actual outturn in MSEK. Source: Statskontoret.
+    Returns all appropriations with budget vs outturn in MSEK.
+    Source: Statskontoret.
 
     Args:
         area_id: Two-digit area ID (e.g. "06" for Defence).
@@ -287,12 +334,20 @@ async def get_expenditure_area(
         "appropriations": [
             {
                 "appropriation_id": r.appropriation_id,
-                "appropriation_name": r.appropriation_name,
+                "appropriation_name": (
+                    r.appropriation_name
+                ),
                 "budget_msek": r.budget_msek,
-                "amendment_budgets_msek": r.amendment_budgets_msek,
+                "amendment_budgets_msek": (
+                    r.amendment_budgets_msek
+                ),
                 "outcome_msek": r.outcome_msek,
-                "opening_balance_msek": r.opening_balance_msek,
-                "closing_balance_msek": r.closing_balance_msek,
+                "opening_balance_msek": (
+                    r.opening_balance_msek
+                ),
+                "closing_balance_msek": (
+                    r.closing_balance_msek
+                ),
             }
             for r in rows
         ],
@@ -304,9 +359,6 @@ async def compare_budgets(
     year_a: int, year_b: int,
 ) -> dict[str, Any]:
     """Compare budget outturn between two years.
-
-    Returns per-area comparison of actual expenditure outturn
-    with absolute delta (MSEK) and percentage change.
 
     Args:
         year_a: First year (baseline).
@@ -327,9 +379,9 @@ async def compare_budgets(
 async def sync_budget_data(
     year: int | None = None,
 ) -> dict[str, Any]:
-    """Download and parse latest budget outturn from Statskontoret.
+    """Download and parse latest budget outturn.
 
-    Persists data atomically to SQLite cache via store_snapshot.
+    Persists data atomically to SQLite cache.
     Raises SyncError if either dataset is missing.
     """
     sk = _require_sk()
@@ -343,17 +395,13 @@ async def sync_budget_data(
 
     return {
         "last_sync": status.last_sync,
-        "next_expected_update": status.next_expected_update,
+        "next_expected_update": (
+            status.next_expected_update
+        ),
         "cache_stats": cache.get_stats(),
         "snapshot": result,
         "sources": [
-            {
-                "source": s.source,
-                "last_synced_at": s.last_synced_at,
-                "source_last_updated": s.source_last_updated,
-                "files_downloaded": s.files_downloaded,
-                "years_covered": s.years_covered,
-            }
+            _serialize_source(s)
             for s in status.sources
         ],
     }
@@ -363,11 +411,13 @@ async def sync_budget_data(
 async def get_revenue(year: int) -> dict[str, Any]:
     """Get tax revenue breakdown for a specific year.
 
-    Returns total and per-category (labour, capital, consumption)
-    in MSEK. Source: SCB PxWeb API (SkatteIntakt).
+    Returns total and per-category (labour, capital,
+    consumption) in MSEK. Source: SCB PxWeb API.
     """
     scb = _require_scb()
-    rows = await scb.get_tax_revenue_summary(years=[year])
+    rows = await scb.get_tax_revenue_summary(
+        years=[year],
+    )
     result: dict[str, float | None] = {}
     for row in rows:
         key = _REVENUE_CATEGORY_MAP.get(
@@ -386,7 +436,7 @@ async def get_revenue(year: int) -> dict[str, Any]:
 async def get_revenue_timeseries(
     from_year: int = 2000, to_year: int = 2024,
 ) -> list[dict[str, Any]]:
-    """Get tax revenue timeseries grouped by category. Source: SCB."""
+    """Get tax revenue timeseries by category. Source: SCB."""
     scb = _require_scb()
     return await scb.get_revenue_timeseries(
         from_year=from_year, to_year=to_year,
@@ -397,9 +447,11 @@ async def get_revenue_timeseries(
 async def get_revenue_detail(
     year: int, tax_types: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Get detailed tax revenue for specific tax types. Source: SCB."""
+    """Get detailed tax revenue for specific types. Source: SCB."""
     scb = _require_scb()
-    rows = await scb.get_tax_revenue(years=[year], tax_types=tax_types)
+    rows = await scb.get_tax_revenue(
+        years=[year], tax_types=tax_types,
+    )
     return [
         {
             "tax_type_code": r.tax_type_code,
@@ -415,10 +467,7 @@ async def get_revenue_detail(
 async def get_laffer_data(
     from_year: int = 1950, to_year: int = 2025,
 ) -> dict[str, Any]:
-    """Get tax quota data: total tax pressure vs GDP over time.
-
-    Source: SCB.
-    """
+    """Get tax quota data: tax pressure vs GDP. Source: SCB."""
     scb = _require_scb()
     points = await build_laffer_curve(
         scb, from_year=from_year, to_year=to_year,
@@ -430,7 +479,7 @@ async def get_laffer_data(
 async def get_laffer_timeseries(
     from_year: int = 1950, to_year: int = 2025,
 ) -> list[dict[str, Any]]:
-    """Get tax quota timeseries with reform annotations. Source: SCB."""
+    """Get tax quota timeseries with reform annotations."""
     scb = _require_scb()
     points = await build_laffer_curve(
         scb, from_year=from_year, to_year=to_year,
@@ -440,7 +489,7 @@ async def get_laffer_timeseries(
 
 @mcp.tool()
 async def get_tax_reforms() -> list[dict[str, Any]]:
-    """Get list of major Swedish tax reforms with descriptions."""
+    """Get list of major Swedish tax reforms."""
     return TAX_REFORMS
 
 
@@ -452,17 +501,12 @@ async def get_sync_status() -> dict[str, Any]:
     status = sk.get_sync_status()
     return {
         "last_sync": status.last_sync,
-        "next_expected_update": status.next_expected_update,
+        "next_expected_update": (
+            status.next_expected_update
+        ),
         "cache": cache.get_stats(),
         "sources": [
-            {
-                "source": s.source,
-                "description": s.description,
-                "publication_cadence": s.publication_cadence,
-                "last_synced_at": s.last_synced_at,
-                "source_last_updated": s.source_last_updated,
-                "years_covered": s.years_covered,
-            }
+            _serialize_source(s)
             for s in status.sources
         ],
     }
@@ -477,7 +521,7 @@ async def get_publication_schedule() -> dict[str, Any]:
 
 @mcp.tool()
 async def get_available_years() -> dict[str, Any]:
-    """Get list of years with loaded budget outturn data."""
+    """Get list of years with loaded outturn data."""
     sk = _require_sk()
     return {"years": sk.get_available_years()}
 
